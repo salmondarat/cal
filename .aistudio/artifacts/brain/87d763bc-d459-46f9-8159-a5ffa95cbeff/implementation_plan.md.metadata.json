@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive implementation plan for the multi-platform social media scheduling calendar application following the Relate design system. Includes switchable Month/Week/Day drag-and-drop planning across Instagram, Facebook, Threads, TikTok, and YouTube, unified composer with per-channel customization, drag-and-drop media up to 1GB with video/carousel support, and an interactive mobile device simulator with authentic platform UI chrome.",
+  "updatedAt":  "2026-10-22T06:51:52.651449590Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

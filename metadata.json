@@ -1,0 +1,6 @@
+{
+  "name": "Relate Social - Multi-Platform Social Media Scheduler & Calendar",
+  "description": "Visual drag-and-drop social media calendar with media upload up to 1GB, per-platform customization, and authentic device simulators for Instagram, Facebook, Threads, TikTok, and YouTube.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

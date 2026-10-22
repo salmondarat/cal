@@ -1,0 +1,931 @@
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  X,
+  UploadCloud,
+  Film,
+  Layers,
+  Image as ImageIcon,
+  Clock,
+  Calendar,
+  Sparkles,
+  Trash2,
+  AlertCircle,
+  CheckCircle2,
+  Smartphone,
+  ChevronDown,
+  ChevronUp,
+  Plus,
+  Play,
+  ArrowRight,
+  HardDrive,
+} from 'lucide-react';
+import {
+  PlatformId,
+  MediaFormat,
+  MediaItem,
+  ScheduledPost,
+  PlatformCustomization,
+} from '../../types';
+import { ALL_PLATFORM_IDS, PLATFORMS, MAX_FILE_SIZE } from '../../constants/platforms';
+import { PlatformIcon } from '../PlatformIcon';
+import {
+  formatBytes,
+  validateFileSize,
+  processFileToMediaItem,
+  SAMPLE_MEDIA_LIBRARY,
+} from '../../utils/mediaUtils';
+import { saveMediaItemToStorage } from '../../utils/mediaStorage';
+
+interface UnifiedComposerModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSavePost: (post: ScheduledPost) => void;
+  initialPost?: ScheduledPost | null;
+  initialDate?: string;
+  initialTime?: string;
+  onPreviewPost?: (post: ScheduledPost) => void;
+  availableStoredMedia?: MediaItem[];
+}
+
+const COMMON_TAGS = [
+  '#B2B',
+  '#SaaS',
+  '#SalesPipeline',
+  '#Productivity',
+  '#TechInnovation',
+  '#Marketing',
+  '#Growth',
+  '#CustomerSuccess',
+];
+
+export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
+  isOpen,
+  onClose,
+  onSavePost,
+  initialPost,
+  initialDate,
+  initialTime,
+  onPreviewPost,
+  availableStoredMedia = [],
+}) => {
+  const [title, setTitle] = useState('');
+  const [showLibraryPicker, setShowLibraryPicker] = useState(false);
+  const [scheduledDate, setScheduledDate] = useState(
+    initialDate || new Date().toISOString().split('T')[0]
+  );
+  const [scheduledTime, setScheduledTime] = useState(initialTime || '10:00');
+  const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformId[]>([
+    'instagram',
+    'tiktok',
+    'youtube',
+  ]);
+  const [baseFormat, setBaseFormat] = useState<MediaFormat>('image');
+  const [mediaList, setMediaList] = useState<MediaItem[]>([]);
+  const [baseCaption, setBaseCaption] = useState('');
+  const [baseHashtags, setBaseHashtags] = useState<string[]>([]);
+  const [hashtagInput, setHashtagInput] = useState('');
+  const [platformOverrides, setPlatformOverrides] = useState<
+    Partial<Record<PlatformId, PlatformCustomization>>
+  >({});
+  const [activePlatformTab, setActivePlatformTab] = useState<PlatformId | null>(null);
+
+  // Upload state
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isDragOverDropZone, setIsDragOverDropZone] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Initialize or reset form when modal opens
+  useEffect(() => {
+    if (initialPost) {
+      setTitle(initialPost.title);
+      setScheduledDate(initialPost.scheduledDate);
+      setScheduledTime(initialPost.scheduledTime);
+      setSelectedPlatforms([...initialPost.platforms]);
+      setBaseFormat(initialPost.format);
+      setMediaList([...initialPost.media]);
+      setBaseCaption(initialPost.baseCaption);
+      setBaseHashtags([...initialPost.baseHashtags]);
+      setPlatformOverrides({ ...initialPost.platformOverrides });
+      setActivePlatformTab(initialPost.platforms[0] || null);
+    } else {
+      setTitle('');
+      setScheduledDate(initialDate || new Date().toISOString().split('T')[0]);
+      setScheduledTime(initialTime || '10:00');
+      setSelectedPlatforms(['instagram', 'tiktok', 'youtube']);
+      setBaseFormat('image');
+      setMediaList([]);
+      setBaseCaption('');
+      setBaseHashtags(['#B2BSaaS', '#TechInnovation']);
+      setPlatformOverrides({});
+      setActivePlatformTab('instagram');
+    }
+    setUploadError(null);
+  }, [initialPost, initialDate, initialTime, isOpen]);
+
+  if (!isOpen) return null;
+
+  // Toggle platform selection
+  const togglePlatform = (pId: PlatformId) => {
+    if (selectedPlatforms.includes(pId)) {
+      if (selectedPlatforms.length === 1) return; // keep at least one
+      const updated = selectedPlatforms.filter((p) => p !== pId);
+      setSelectedPlatforms(updated);
+      if (activePlatformTab === pId) {
+        setActivePlatformTab(updated[0] || null);
+      }
+    } else {
+      const updated = [...selectedPlatforms, pId];
+      setSelectedPlatforms(updated);
+      if (!activePlatformTab) setActivePlatformTab(pId);
+    }
+  };
+
+  // Add files to media list
+  const handleFilesAdded = async (files: FileList | File[]) => {
+    setUploadError(null);
+    const validFiles: File[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const validation = validateFileSize(file);
+      if (!validation.valid) {
+        setUploadError(validation.error || 'File size exceeds maximum 1 GB limit.');
+        return;
+      }
+      validFiles.push(file);
+    }
+
+    if (validFiles.length === 0) return;
+
+    setIsUploading(true);
+    setUploadProgress(20);
+
+    // Simulate upload progression for user visual feedback
+    const timer = setInterval(() => {
+      setUploadProgress((prev) => {
+        if (prev >= 90) {
+          clearInterval(timer);
+          return 90;
+        }
+        return prev + 25;
+      });
+    }, 150);
+
+    try {
+      const newMediaItems: MediaItem[] = [];
+      for (const file of validFiles) {
+        const item = await processFileToMediaItem(file);
+        await saveMediaItemToStorage(item);
+        newMediaItems.push(item);
+      }
+
+      clearInterval(timer);
+      setUploadProgress(100);
+
+      setTimeout(() => {
+        const combined = [...mediaList, ...newMediaItems];
+        setMediaList(combined);
+
+        // Auto-update baseFormat
+        if (combined.length > 1) {
+          setBaseFormat('carousel');
+        } else if (combined.length === 1 && combined[0].type.startsWith('video/')) {
+          setBaseFormat('video');
+        } else {
+          setBaseFormat('image');
+        }
+
+        setIsUploading(false);
+        setUploadProgress(0);
+      }, 300);
+    } catch {
+      clearInterval(timer);
+      setIsUploading(false);
+      setUploadError('Failed to process media files.');
+    }
+  };
+
+  // Add preset sample media from library
+  const handleAddSamplePreset = (categoryIndex: number) => {
+    const presetGroup = SAMPLE_MEDIA_LIBRARY[categoryIndex];
+    if (!presetGroup) return;
+
+    const combined = [...mediaList, ...presetGroup.items];
+    setMediaList(combined);
+
+    if (presetGroup.category.includes('Carousel')) {
+      setBaseFormat('carousel');
+    } else if (presetGroup.category.includes('Video')) {
+      setBaseFormat('video');
+    } else {
+      setBaseFormat('image');
+    }
+  };
+
+  const removeMediaItem = (id: string) => {
+    const filtered = mediaList.filter((m) => m.id !== id);
+    setMediaList(filtered);
+    if (filtered.length <= 1 && baseFormat === 'carousel') {
+      setBaseFormat(filtered[0]?.type.startsWith('video/') ? 'video' : 'image');
+    }
+  };
+
+  // Hashtag handling
+  const handleAddHashtag = (tag: string) => {
+    const cleanTag = tag.trim().startsWith('#') ? tag.trim() : `#${tag.trim()}`;
+    if (cleanTag.length > 1 && !baseHashtags.includes(cleanTag)) {
+      setBaseHashtags([...baseHashtags, cleanTag]);
+    }
+    setHashtagInput('');
+  };
+
+  const removeHashtag = (tagToRemove: string) => {
+    setBaseHashtags(baseHashtags.filter((t) => t !== tagToRemove));
+  };
+
+  // Platform override updater helper
+  const updatePlatformOverride = (
+    pId: PlatformId,
+    field: keyof PlatformCustomization,
+    value: any
+  ) => {
+    const current = platformOverrides[pId] || {
+      caption: baseCaption,
+      hashtags: [...baseHashtags],
+      scheduledTime: scheduledTime,
+      format: baseFormat,
+    };
+
+    setPlatformOverrides({
+      ...platformOverrides,
+      [pId]: {
+        ...current,
+        [field]: value,
+      },
+    });
+  };
+
+  // Build final ScheduledPost object
+  const buildPostObject = (status: 'scheduled' | 'draft' = 'scheduled'): ScheduledPost => {
+    return {
+      id: initialPost?.id || `post-${Date.now()}`,
+      title: title.trim() || 'Untitled Social Campaign',
+      scheduledDate,
+      scheduledTime,
+      platforms: selectedPlatforms,
+      format: baseFormat,
+      media: mediaList,
+      baseCaption,
+      baseHashtags,
+      platformOverrides,
+      status,
+      createdAt: initialPost?.createdAt || new Date().toISOString(),
+      metrics: initialPost?.metrics || {
+        likes: Math.floor(Math.random() * 800) + 120,
+        comments: Math.floor(Math.random() * 60) + 10,
+        shares: Math.floor(Math.random() * 40) + 5,
+      },
+    };
+  };
+
+  const handleSave = (status: 'scheduled' | 'draft' = 'scheduled') => {
+    const post = buildPostObject(status);
+    onSavePost(post);
+    onClose();
+  };
+
+  const handleLivePreview = () => {
+    const post = buildPostObject('scheduled');
+    onPreviewPost?.(post);
+  };
+
+  // Calculate total media size
+  const totalMediaBytes = mediaList.reduce((acc, m) => acc + m.size, 0);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+      <div className="relative w-full max-w-4xl bg-white rounded-[12px] shadow-2xl border border-neutral-200/80 overflow-hidden flex flex-col max-h-[92vh]">
+        {/* Modal Header */}
+        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-neutral-50/70">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-[8px] bg-[#020520] text-white flex items-center justify-center font-bold text-xs">
+              R
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-[#020520] leading-none">
+                {initialPost ? 'Edit Scheduled Social Post' : 'Unified Social Post Composer'}
+              </h3>
+              <p className="text-[11px] text-neutral-500 mt-0.5">
+                Multi-channel scheduling with drag-and-drop media up to 1 GB
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {mediaList.length > 0 && (
+              <button
+                onClick={handleLivePreview}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#0000ee] bg-blue-50/80 hover:bg-blue-100/80 border border-[rgba(24,144,255,0.3)] rounded-[6px] transition-colors cursor-pointer"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>Device Preview</span>
+              </button>
+            )}
+
+            <button
+              onClick={onClose}
+              className="p-1.5 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-200/60 rounded-[8px] transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Modal Body */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fcfcfc]">
+          {/* Section 1: Target Platforms Selection */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-[#0f1f3d] flex items-center justify-between">
+              <span>Select Target Channels</span>
+              <span className="text-[11px] font-normal text-neutral-500">
+                {selectedPlatforms.length} active
+              </span>
+            </label>
+
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              {ALL_PLATFORM_IDS.map((pId) => {
+                const pConfig = PLATFORMS[pId];
+                const isSelected = selectedPlatforms.includes(pId);
+
+                return (
+                  <button
+                    key={pId}
+                    type="button"
+                    onClick={() => togglePlatform(pId)}
+                    className={`p-2.5 rounded-[8px] border text-left transition-all flex items-center gap-2.5 cursor-pointer ${
+                      isSelected
+                        ? 'bg-white border-[#0000ee] shadow-2xs ring-1 ring-[#0000ee]'
+                        : 'bg-white border-neutral-200/90 hover:border-neutral-300 text-neutral-600'
+                    }`}
+                  >
+                    <PlatformIcon platform={pId} size={18} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold text-neutral-900 truncate">
+                        {pConfig.name}
+                      </div>
+                      <div className="text-[10px] text-neutral-400 truncate">
+                        {pConfig.charLimit.toLocaleString()} chars
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section 2: Media Ingestion Zone (Support up to 1 GB) */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-[#0f1f3d] flex items-center gap-1.5">
+                <span>Upload Media Assets</span>
+                <span className="text-[10px] font-mono text-neutral-400">
+                  (Images, Videos & Carousels up to 1.0 GB)
+                </span>
+              </label>
+
+              {totalMediaBytes > 0 && (
+                <span className="text-xs font-mono text-neutral-600 tabular-nums">
+                  {formatBytes(totalMediaBytes)} / 1.0 GB
+                </span>
+              )}
+            </div>
+
+            {/* Error Banner */}
+            {uploadError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-[8px] flex items-center gap-2 text-xs text-red-700">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>{uploadError}</span>
+              </div>
+            )}
+
+            {/* Drag and Drop Zone */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragOverDropZone(true);
+              }}
+              onDragLeave={() => setIsDragOverDropZone(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragOverDropZone(false);
+                if (e.dataTransfer.files) {
+                  handleFilesAdded(e.dataTransfer.files);
+                }
+              }}
+              onClick={() => fileInputRef.current?.click()}
+              className={`p-6 border-2 border-dashed rounded-[10px] text-center transition-all cursor-pointer relative ${
+                isDragOverDropZone
+                  ? 'border-[#0000ee] bg-blue-50/70'
+                  : 'border-neutral-200/90 hover:border-[#1890ff] bg-neutral-50/60 hover:bg-neutral-50'
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,video/*"
+                onChange={(e) => {
+                  if (e.target.files) handleFilesAdded(e.target.files);
+                }}
+                className="hidden"
+              />
+
+              <div className="flex flex-col items-center justify-center space-y-1.5">
+                <div className="w-10 h-10 rounded-full bg-[rgba(24,144,255,0.08)] border border-[rgba(24,144,255,0.2)] flex items-center justify-center text-[#0000ee]">
+                  <UploadCloud className="w-5 h-5" />
+                </div>
+                <div className="text-xs font-semibold text-neutral-800">
+                  Click or drag and drop images or videos here
+                </div>
+                <div className="text-[11px] text-neutral-500">
+                  Supports MP4, MOV, WebM, JPG, PNG up to <span className="font-semibold text-neutral-700">1 GB</span> per post
+                </div>
+              </div>
+
+              {isUploading && (
+                <div className="mt-3 max-w-xs mx-auto">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-neutral-600 mb-1">
+                    <span>Processing Media...</span>
+                    <span>{uploadProgress}%</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-neutral-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[#0000ee] transition-all duration-200"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Quick Sample Presets */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <span className="text-[11px] text-neutral-500">Instant Test Presets:</span>
+              <button
+                type="button"
+                onClick={() => handleAddSamplePreset(1)}
+                className="px-2 py-0.5 text-[10px] font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[6px] hover:border-[#1890ff] transition-colors cursor-pointer flex items-center gap-1"
+              >
+                <Film className="w-3 h-3 text-[#0000ee]" />
+                <span>+ 4K Vertical Reel</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddSamplePreset(2)}
+                className="px-2 py-0.5 text-[10px] font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[6px] hover:border-[#1890ff] transition-colors cursor-pointer flex items-center gap-1"
+              >
+                <Layers className="w-3 h-3 text-[#0000ee]" />
+                <span>+ 3-Slide Carousel</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddSamplePreset(0)}
+                className="px-2 py-0.5 text-[10px] font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[6px] hover:border-[#1890ff] transition-colors cursor-pointer flex items-center gap-1"
+              >
+                <ImageIcon className="w-3 h-3 text-[#0000ee]" />
+                <span>+ SaaS Dashboard Photo</span>
+              </button>
+              {availableStoredMedia.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowLibraryPicker(!showLibraryPicker)}
+                  className="px-2 py-0.5 text-[10px] font-medium text-[#0000ee] bg-blue-50/80 border border-blue-200 rounded-[6px] hover:bg-blue-100 transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <HardDrive className="w-3 h-3 text-[#0000ee]" />
+                  <span>Choose from Saved Storage ({availableStoredMedia.length})</span>
+                </button>
+              )}
+            </div>
+
+            {/* Stored Media Selector Tray */}
+            {showLibraryPicker && availableStoredMedia.length > 0 && (
+              <div className="p-3 border border-neutral-200 rounded-[8px] bg-neutral-50/80 space-y-2">
+                <div className="flex items-center justify-between text-xs font-semibold text-neutral-800">
+                  <span>Select from Local Storage Library:</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowLibraryPicker(false)}
+                    className="text-neutral-400 hover:text-neutral-600 text-[11px]"
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-44 overflow-y-auto">
+                  {availableStoredMedia.map((asset) => (
+                    <div
+                      key={asset.id}
+                      onClick={() => {
+                        if (!mediaList.some((m) => m.id === asset.id)) {
+                          const combined = [...mediaList, asset];
+                          setMediaList(combined);
+                          if (combined.length > 1) setBaseFormat('carousel');
+                          else if (asset.type.startsWith('video/')) setBaseFormat('video');
+                        }
+                      }}
+                      className="p-1.5 rounded-[6px] border border-neutral-200 bg-white hover:border-[#0000ee] cursor-pointer text-left transition-all group"
+                    >
+                      <div className="aspect-video bg-neutral-900 rounded-[4px] overflow-hidden relative mb-1">
+                        {asset.type.startsWith('video/') ? (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <Play className="w-4 h-4 text-white fill-white" />
+                          </div>
+                        ) : (
+                          <img
+                            src={asset.url}
+                            alt=""
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover"
+                          />
+                        )}
+                      </div>
+                      <div className="text-[10px] font-medium text-neutral-800 truncate">
+                        {asset.name}
+                      </div>
+                      <div className="text-[9px] text-neutral-400 font-mono">
+                        {formatBytes(asset.size)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Media Thumbnails List */}
+            {mediaList.length > 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                {mediaList.map((item, idx) => (
+                  <div
+                    key={item.id}
+                    className="group relative rounded-[8px] border border-neutral-200 bg-white overflow-hidden shadow-2xs"
+                  >
+                    <div className="relative aspect-video bg-neutral-900 flex items-center justify-center">
+                      {item.type.startsWith('video/') ? (
+                        <>
+                          <video
+                            src={item.url}
+                            className="w-full h-full object-cover"
+                            playsInline
+                            muted
+                          />
+                          <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                            <Play className="w-5 h-5 text-white fill-white" />
+                          </div>
+                        </>
+                      ) : (
+                        <img
+                          src={item.url}
+                          alt={item.name}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => removeMediaItem(item.id)}
+                        className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-red-600 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    <div className="p-1.5 flex items-center justify-between text-[10px] font-mono text-neutral-600">
+                      <span className="truncate max-w-[100px]">{item.name}</span>
+                      <span className="text-neutral-400">{formatBytes(item.size)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Section 3: Campaign Title, Date & Time */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-[#0f1f3d] mb-1 block">
+                Campaign / Post Title
+              </label>
+              <input
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. Q4 Product Launch Teaser"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-[#0f1f3d] mb-1 block">
+                Scheduled Date
+              </label>
+              <input
+                type="date"
+                value={scheduledDate}
+                onChange={(e) => setScheduledDate(e.target.value)}
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-[#0f1f3d] mb-1 block">
+                Base Scheduled Time
+              </label>
+              <input
+                type="time"
+                value={scheduledTime}
+                onChange={(e) => setScheduledTime(e.target.value)}
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+              />
+            </div>
+          </div>
+
+          {/* Section 4: Base Caption & Hashtags */}
+          <div className="space-y-3 p-4 rounded-[8px] relate-card">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-[#020520]">
+                  Core Caption (Shared across all channels)
+                </label>
+                <span className="text-[11px] font-mono text-neutral-500">
+                  {baseCaption.length} characters
+                </span>
+              </div>
+              <textarea
+                rows={3}
+                value={baseCaption}
+                onChange={(e) => setBaseCaption(e.target.value)}
+                placeholder="Write your primary message, announcement, or story here..."
+                className="w-full px-3 py-2 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee] leading-relaxed"
+              />
+            </div>
+
+            {/* Hashtag Management */}
+            <div>
+              <label className="text-xs font-semibold text-[#020520] mb-1 block">
+                Hashtags ({baseHashtags.length})
+              </label>
+
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  type="text"
+                  value={hashtagInput}
+                  onChange={(e) => setHashtagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddHashtag(hashtagInput);
+                    }
+                  }}
+                  placeholder="Type hashtag and press Enter..."
+                  className="flex-1 px-3 py-1 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddHashtag(hashtagInput)}
+                  className="px-3 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50"
+                >
+                  Add
+                </button>
+              </div>
+
+              {/* Active Hashtags */}
+              <div className="flex flex-wrap gap-1.5">
+                {baseHashtags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono text-[#0000ee] bg-white border border-[rgba(24,144,255,0.3)] rounded-[6px]"
+                  >
+                    <span>{tag}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeHashtag(tag)}
+                      className="text-neutral-400 hover:text-red-500"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              {/* Suggestions */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-2 text-[11px]">
+                <span className="text-neutral-400">Suggestions:</span>
+                {COMMON_TAGS.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => handleAddHashtag(t)}
+                    className="text-neutral-600 hover:text-[#0000ee] hover:underline"
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Section 5: Individual Platform Customization Tabs */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-[#0f1f3d]">
+                Individual Channel Customization
+              </label>
+              <span className="text-[11px] text-neutral-500">
+                Override caption, hashtags, format, or time per channel
+              </span>
+            </div>
+
+            {/* Platform Selector Tabs */}
+            <div className="flex items-center gap-1 border-b border-neutral-200 pb-1 overflow-x-auto">
+              {selectedPlatforms.map((pId) => {
+                const isActive = activePlatformTab === pId;
+                const pConfig = PLATFORMS[pId];
+                const override = platformOverrides[pId];
+
+                return (
+                  <button
+                    key={pId}
+                    type="button"
+                    onClick={() => setActivePlatformTab(pId)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t-[8px] transition-colors whitespace-nowrap cursor-pointer ${
+                      isActive
+                        ? 'bg-white border-x border-t border-neutral-200 text-[#0000ee] font-semibold -mb-1 pb-2 shadow-2xs'
+                        : 'text-neutral-600 hover:text-neutral-900'
+                    }`}
+                  >
+                    <PlatformIcon platform={pId} size={14} />
+                    <span>{pConfig.name}</span>
+                    {override?.caption && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Active Platform Tab Editor */}
+            {activePlatformTab && (
+              <div className="p-4 bg-white border border-neutral-200 rounded-[8px] space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <PlatformIcon platform={activePlatformTab} size={18} />
+                    <span className="text-xs font-semibold text-neutral-900">
+                      {PLATFORMS[activePlatformTab].name} Settings
+                    </span>
+                  </div>
+
+                  <span className="text-[11px] font-mono text-neutral-400">
+                    Max: {PLATFORMS[activePlatformTab].charLimit.toLocaleString()} characters
+                  </span>
+                </div>
+
+                {/* Specific Caption */}
+                <div>
+                  <label className="text-[11px] font-medium text-neutral-700 mb-1 block">
+                    Customized Caption for {PLATFORMS[activePlatformTab].name}
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={platformOverrides[activePlatformTab]?.caption ?? baseCaption}
+                    onChange={(e) =>
+                      updatePlatformOverride(activePlatformTab, 'caption', e.target.value)
+                    }
+                    placeholder="Leave as base caption or customize for this audience..."
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Specific Time */}
+                  <div>
+                    <label className="text-[11px] font-medium text-neutral-700 mb-1 block">
+                      Specific Schedule Time
+                    </label>
+                    <input
+                      type="time"
+                      value={
+                        platformOverrides[activePlatformTab]?.scheduledTime ?? scheduledTime
+                      }
+                      onChange={(e) =>
+                        updatePlatformOverride(activePlatformTab, 'scheduledTime', e.target.value)
+                      }
+                      className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px]"
+                    />
+                  </div>
+
+                  {/* Format override */}
+                  <div>
+                    <label className="text-[11px] font-medium text-neutral-700 mb-1 block">
+                      Channel Format
+                    </label>
+                    <select
+                      value={platformOverrides[activePlatformTab]?.format ?? baseFormat}
+                      onChange={(e) =>
+                        updatePlatformOverride(
+                          activePlatformTab,
+                          'format',
+                          e.target.value as MediaFormat
+                        )
+                      }
+                      className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px]"
+                    >
+                      {PLATFORMS[activePlatformTab].supportedFormats.map((f, i) => (
+                        <option key={i} value={f.format}>
+                          {f.label} ({f.aspectRatio})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Platform Specific extras */}
+                {activePlatformTab === 'instagram' && (
+                  <div>
+                    <label className="text-[11px] font-medium text-neutral-700 mb-1 block">
+                      Automated First Comment (optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={platformOverrides['instagram']?.firstComment || ''}
+                      onChange={(e) =>
+                        updatePlatformOverride('instagram', 'firstComment', e.target.value)
+                      }
+                      placeholder="e.g. Drop your team size below to unlock VIP perks! 👇"
+                      className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px]"
+                    />
+                  </div>
+                )}
+
+                {activePlatformTab === 'tiktok' && (
+                  <div>
+                    <label className="text-[11px] font-medium text-neutral-700 mb-1 block">
+                      Soundtrack / Audio Title
+                    </label>
+                    <input
+                      type="text"
+                      value={platformOverrides['tiktok']?.soundTitle || ''}
+                      onChange={(e) =>
+                        updatePlatformOverride('tiktok', 'soundTitle', e.target.value)
+                      }
+                      placeholder="e.g. Original Audio - Relate Sound Lab"
+                      className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px]"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div className="px-5 py-3.5 border-t border-neutral-200 flex flex-col sm:flex-row items-center justify-between gap-3 bg-neutral-50/70">
+          <div className="flex items-center gap-2 text-xs text-neutral-500 font-mono">
+            <Clock className="w-3.5 h-3.5 text-[#0000ee]" />
+            <span>
+              Queueing for {scheduledDate} at {scheduledTime}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3.5 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50 cursor-pointer"
+            >
+              Cancel
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSave('draft')}
+              className="px-3.5 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50 cursor-pointer"
+            >
+              Save Draft
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSave('scheduled')}
+              className="px-4 py-1.5 text-xs font-semibold text-white bg-[#020520] hover:bg-[#0f1f3d] rounded-[8px] transition-colors shadow-xs cursor-pointer"
+            >
+              Schedule Across Channels
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
