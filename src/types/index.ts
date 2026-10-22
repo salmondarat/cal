@@ -16,6 +16,8 @@ export interface MediaItem {
   fileRef?: File;
   uploadedAt?: string;
   thumbnailUrl?: string;
+  serverManaged?: boolean; // stored in the universal date-folder media dir via backend
+  folderDate?: string; // YYYY-MM-DD folder the file lives in
 }
 
 export interface PlatformCustomization {

@@ -5,6 +5,100 @@ const DB_NAME = 'RelateSocialMediaDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'media_assets';
 
+// ---------- Universal (backend) storage mode ----------
+// When server.ts is running, media lives on disk at
+// <RELATE_DATA_DIR || %LOCALAPPDATA%\RelateSocial>\media\YYYY-MM-DD\<file>
+// — shared across every build, port, and browser. Without the backend we
+// fall back to per-origin IndexedDB.
+
+let serverMode: boolean | null = null;
+
+export async function getMediaStorageInfo(): Promise<any | null> {
+  try {
+    const res = await fetch('/api/storage/info', { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function serverAvailable(): Promise<boolean> {
+  if (serverMode === null) serverMode = Boolean(await getMediaStorageInfo());
+  return serverMode;
+}
+
+function localDateFolder(iso?: string): string {
+  const d = iso ? new Date(iso) : new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function asArrayBuffer(data: ArrayBuffer | Uint8Array): ArrayBuffer {
+  if (data instanceof ArrayBuffer) return data;
+  const out = new ArrayBuffer(data.byteLength);
+  new Uint8Array(out).set(data);
+  return out;
+}
+
+async function uploadBufferToServer(date: string, name: string, data: ArrayBuffer | Uint8Array): Promise<MediaItem> {
+  const blob = new Blob([asArrayBuffer(data)]);
+  const res = await fetch(
+    `/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`,
+    { method: 'POST', body: blob },
+  );
+  if (!res.ok) throw new Error(`Media upload failed: ${(await res.json().catch(() => ({})) as any).error || res.status}`);
+  const saved: any = await res.json();
+  return {
+    id: `${saved.date}/${saved.name}`,
+    name: saved.name,
+    url: saved.url,
+    size: saved.size,
+    type: saved.type,
+    uploadedAt: saved.modifiedAt,
+    serverManaged: true,
+    folderDate: saved.date,
+  };
+}
+
+async function saveToServer(item: MediaItem, date: string): Promise<void> {
+  if (item.serverManaged) return; // already on disk
+  if (item.fileRef) {
+    await uploadBufferToServer(date, item.fileRef.name, await item.fileRef.arrayBuffer());
+  } else if (typeof item.url === 'string' && item.url.startsWith('data:')) {
+    const [meta, b64] = item.url.split(',');
+    const ext = ({ 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov' } as Record<string, string>)[meta.match(/data:([^;]+)/)?.[1] || ''] || '.bin';
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    await uploadBufferToServer(date, `${item.name || 'media'}${ext}`, bytes);
+  }
+  // remote http(s) URLs stay as-is: they are already shared, no copy needed
+}
+
+function serverItemToFileEntry(entry: any): MediaItem {
+  return {
+    id: `${entry.date}/${entry.name}`,
+    name: entry.name,
+    url: entry.url,
+    size: entry.size,
+    type: entry.type,
+    uploadedAt: entry.modifiedAt,
+    serverManaged: true,
+    folderDate: entry.date,
+  };
+}
+
+async function getAllFromServer(): Promise<MediaItem[]> {
+  const dates: any[] = await fetch('/api/storage/media/dates').then((r) => r.json());
+  const lists = await Promise.all(
+    dates.map((d) => fetch(`/api/storage/media?date=${d.date}`).then((r) => r.json())),
+  );
+  return lists.flat().map(serverItemToFileEntry);
+}
+
+// ---------- IndexedDB fallback (per-origin) ----------
+
 function openMediaDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) {
@@ -26,20 +120,26 @@ function openMediaDB(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveMediaItemToStorage(item: MediaItem): Promise<void> {
+export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: string): Promise<void> {
+  const date = dateFolder || localDateFolder(item.uploadedAt);
+  if (await serverAvailable()) {
+    try {
+      await saveToServer(item, date);
+      return;
+    } catch (e) {
+      console.warn('Universal media storage upload failed, falling back to IndexedDB:', e);
+    }
+  }
   try {
     const db = await openMediaDB();
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-
-      // Clean item copy with timestamp
       const storedItem: MediaItem = {
         ...item,
         uploadedAt: item.uploadedAt || new Date().toISOString(),
-        fileRef: undefined, // Don't serialize live File pointer
+        fileRef: undefined,
       };
-
       const req = store.put(storedItem);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
@@ -51,6 +151,16 @@ export async function saveMediaItemToStorage(item: MediaItem): Promise<void> {
 }
 
 export async function getAllStoredMedia(): Promise<MediaItem[]> {
+  if (await serverAvailable()) {
+    try {
+      const items = await getAllFromServer();
+      if (items.length > 0) return items;
+      // First boot on a fresh disk: show the sample library (remote URLs, not copied).
+      return SAMPLE_MEDIA_LIBRARY.flatMap((cat) => cat.items);
+    } catch (e) {
+      console.warn('Universal media scan failed, falling back to IndexedDB:', e);
+    }
+  }
   try {
     const db = await openMediaDB();
     const items: MediaItem[] = await new Promise((resolve, reject) => {
@@ -79,6 +189,14 @@ export async function getAllStoredMedia(): Promise<MediaItem[]> {
 }
 
 export async function deleteStoredMediaItem(id: string): Promise<void> {
+  if (id.includes('/') && (await serverAvailable())) {
+    const [date, name] = id.split('/');
+    const res = await fetch(`/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) console.warn('Failed to delete from universal storage:', await res.text());
+    return;
+  }
   try {
     const db = await openMediaDB();
     return new Promise((resolve, reject) => {
@@ -95,6 +213,11 @@ export async function deleteStoredMediaItem(id: string): Promise<void> {
 }
 
 export async function clearAllStoredMedia(): Promise<void> {
+  if (await serverAvailable()) {
+    const items = await getAllFromServer().catch(() => []);
+    await Promise.all(items.map((m) => deleteStoredMediaItem(m.id)));
+    return;
+  }
   try {
     const db = await openMediaDB();
     return new Promise((resolve, reject) => {

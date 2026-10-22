@@ -24,7 +24,7 @@ interface ApiSettingsModalProps {
 
 const STORAGE_API_KEY = 'relate_social_api_credentials_v1';
 
-const DEFAULT_CREDENTIALS: Record<PlatformId, PlatformApiCredentials> = {
+const SANDBOX_DEMO_CREDENTIALS: Record<PlatformId, PlatformApiCredentials> = {
   instagram: {
     platformId: 'instagram',
     isConnected: true,
@@ -78,6 +78,24 @@ const DEFAULT_CREDENTIALS: Record<PlatformId, PlatformApiCredentials> = {
   },
 };
 
+const DEFAULT_CREDENTIALS: Record<PlatformId, PlatformApiCredentials> = {
+  ...SANDBOX_DEMO_CREDENTIALS,
+  instagram: { ...SANDBOX_DEMO_CREDENTIALS.instagram, isConnected: false, apiKey: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
+  facebook: { ...SANDBOX_DEMO_CREDENTIALS.facebook, isConnected: false, apiKey: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
+  tiktok: { ...SANDBOX_DEMO_CREDENTIALS.tiktok, isConnected: false, apiKey: '', apiSecret: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
+  threads: { ...SANDBOX_DEMO_CREDENTIALS.threads, isConnected: false, accessToken: '', accountId: '', lastTested: 'Not connected' },
+  youtube: { ...SANDBOX_DEMO_CREDENTIALS.youtube, isConnected: false, apiKey: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
+};
+
+interface ServerConnection {
+  connected: boolean;
+  maskedToken: string;
+  accountIds: string[];
+  accountNames: string[];
+  scopes: string[];
+  connectedAt: string;
+}
+
 export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   isOpen,
   onClose,
@@ -94,6 +112,8 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   const [activeTab, setActiveTab] = useState<PlatformId>('instagram');
   const [showTokens, setShowTokens] = useState<Record<string, boolean>>({});
   const [testingPlatform, setTestingPlatform] = useState<PlatformId | null>(null);
+  const [connecting, setConnecting] = useState<PlatformId | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{
     success: boolean;
     message: string;
@@ -104,6 +124,59 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       localStorage.setItem(STORAGE_API_KEY, JSON.stringify(credentials));
     } catch {}
   }, [credentials]);
+
+  const applyServerConnections = (conns: Record<string, ServerConnection>) => {
+    setCredentials((prev) => {
+      const next = { ...prev };
+      const sync = (platforms: PlatformId[], conn?: ServerConnection) => {
+        for (const pId of platforms) {
+          const connected = Boolean(conn);
+          let accountId = conn?.accountNames?.[0] || '';
+          if (pId === 'instagram' && conn) {
+            accountId = conn.accountNames.find((n) => n.includes('@')) || conn.accountNames[1] || '';
+          }
+          if (pId === 'facebook' && conn) {
+            accountId = conn.accountNames[1] || conn.accountNames[0] || '';
+          }
+          next[pId] = {
+            ...next[pId],
+            isConnected: connected,
+            accessToken: conn?.maskedToken || next[pId].accessToken || '',
+            accountId: conn ? accountId : next[pId].accountId,
+            environment: connected ? 'production' : prev[pId].environment,
+            permissions: conn ? conn.scopes : prev[pId].permissions,
+            lastTested: conn
+              ? `OAuth completed ${new Date(conn.connectedAt).toLocaleString()}`
+              : 'Not connected',
+          };
+        }
+      };
+      sync(['facebook', 'instagram'], conns.meta);
+      sync(['threads'], conns.threads);
+      sync(['tiktok'], conns.tiktok);
+      sync(['youtube'], conns.youtube);
+      return next;
+    });
+  };
+
+  const refreshConnections = async () => {
+    try {
+      const conns = await fetch('/api/connections').then((r) => r.json());
+      applyServerConnections(conns);
+      return conns as Record<string, ServerConnection>;
+    } catch {
+      setServerError('OAuth backend is not running. Start it with `npm run dev:server`.');
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      setServerError(null);
+      refreshConnections();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -124,46 +197,98 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     }));
   };
 
-  const handleTestConnection = (platformId: PlatformId) => {
+  const OAUTH_START_PATH: Record<PlatformId, string> = {
+    instagram: '/auth/meta/start',
+    facebook: '/auth/meta/start',
+    threads: '/auth/threads/start',
+    tiktok: '/auth/tiktok/start',
+    youtube: '/auth/google/start',
+  };
+
+  const CONNECTION_GROUP: Record<PlatformId, 'meta' | 'threads' | 'tiktok' | 'youtube'> = {
+    instagram: 'meta',
+    facebook: 'meta',
+    threads: 'threads',
+    tiktok: 'tiktok',
+    youtube: 'youtube',
+  };
+
+  const handleConnect = async (platformId: PlatformId) => {
+    setServerError(null);
+    const oauthPath = OAUTH_START_PATH[platformId];
+    const probeRes = await fetch(oauthPath, { redirect: 'manual' }).catch(() => null);
+    if (!probeRes) {
+      setServerError('OAuth backend is not running. Start it with `npm run dev:server`.');
+      return;
+    }
+    setConnecting(platformId);
+    window.open(oauthPath, 'relate-oauth', 'width=580,height=760,menubar=no,toolbar=no');
+
+    const started = Date.now();
+    const group = CONNECTION_GROUP[platformId];
+    const poll = window.setInterval(async () => {
+      try {
+        const conns = await fetch('/api/connections').then((r) => r.json());
+        if (conns[group]) {
+          window.clearInterval(poll);
+          setConnecting(null);
+          applyServerConnections(conns);
+          setTestResult({
+            success: true,
+            message: `Live OAuth completed for ${conns[group].accountNames.join(', ')}.`,
+          });
+        } else if (Date.now() - started > 180000) {
+          window.clearInterval(poll);
+          setConnecting(null);
+        }
+      } catch {
+        window.clearInterval(poll);
+        setConnecting(null);
+      }
+    }, 2000);
+  };
+
+  const handleTestConnection = async (platformId: PlatformId) => {
     setTestingPlatform(platformId);
     setTestResult(null);
-
-    setTimeout(() => {
-      setTestingPlatform(null);
+    try {
+      const res = await fetch(`/api/verify/${platformId}`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       setCredentials((prev) => ({
         ...prev,
         [platformId]: {
           ...prev[platformId],
-          isConnected: true,
-          lastTested: 'Verified just now',
+          isConnected: data.ok,
+          lastTested: `Live API verified ${new Date(data.checkedAt).toLocaleTimeString()}`,
         },
       }));
       setTestResult({
-        success: true,
-        message: `Successfully authenticated with ${PLATFORMS[platformId].name} API. Authorized scopes: ${credentials[platformId].permissions.join(
-          ', '
-        )}`,
+        success: data.ok,
+        message: data.ok
+          ? `Live ${PLATFORMS[platformId].name} API handshake OK — identity: ${data.identity}` +
+            (data.instagram?.length ? ` · Instagram: ${data.instagram.map((i: any) => `@${i.username}`).join(', ')}` : '')
+          : data.warning || 'Verified, but no usable account was returned.',
       });
-    }, 1200);
+    } catch (err: any) {
+      setTestResult({ success: false, message: err.message });
+    } finally {
+      setTestingPlatform(null);
+    }
   };
 
-  const handleDisconnect = (platformId: PlatformId) => {
-    setCredentials((prev) => ({
-      ...prev,
-      [platformId]: {
-        ...prev[platformId],
-        isConnected: false,
-        lastTested: 'Disconnected',
-      },
-    }));
+  const handleDisconnect = async (platformId: PlatformId) => {
+    await fetch(`/api/disconnect/${CONNECTION_GROUP[platformId]}`, { method: 'POST' }).catch(() => {});
+    await refreshConnections();
     setTestResult(null);
   };
 
-  const handleResetDefaults = () => {
-    setCredentials(DEFAULT_CREDENTIALS);
+  const handleResetDefaults = async () => {
+    setCredentials(SANDBOX_DEMO_CREDENTIALS);
+    await refreshConnections();
     setTestResult({
       success: true,
-      message: 'Restored verified official sandbox credentials for all 5 platforms.',
+      message: 'Sandbox demo credentials loaded. Live OAuth connections from the backend are shown as-is.',
     });
   };
 
@@ -271,14 +396,25 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                 ) : (
                   <button
                     type="button"
-                    onClick={() => handleTestConnection(activeTab)}
-                    className="px-2.5 py-1 text-xs text-[#0000ee] hover:bg-blue-50 border border-blue-200 rounded-[6px] transition-colors font-medium"
+                    disabled={connecting === activeTab}
+                    onClick={() => handleConnect(activeTab)}
+                    className="px-2.5 py-1 text-xs text-[#0000ee] hover:bg-blue-50 border border-blue-200 rounded-[6px] transition-colors font-medium disabled:opacity-50"
                   >
-                    Connect Platform
+                    {connecting === activeTab
+                      ? 'Waiting for OAuth approval...'
+                      : `Connect via ${activeTab === 'tiktok' ? 'TikTok' : activeTab === 'youtube' ? 'Google' : 'Meta'} OAuth`}
                   </button>
                 )}
               </div>
             </div>
+
+            {/* Backend status banner */}
+            {serverError && (
+              <div className="p-3 rounded-[8px] text-xs flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-800">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{serverError}</span>
+              </div>
+            )}
 
             {/* Test result feedback banner */}
             {testResult && (
@@ -289,7 +425,11 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                     : 'bg-red-50 border border-red-200 text-red-800'
                 }`}
               >
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                {testResult.success ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                )}
                 <span>{testResult.message}</span>
               </div>
             )}
@@ -345,8 +485,9 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                     type={showTokens[`${activeTab}_token`] ? 'text' : 'password'}
                     value={currentCred.accessToken || ''}
                     onChange={(e) => updateField('accessToken', e.target.value)}
-                    placeholder="Paste your official Graph API token here..."
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                    disabled
+                    placeholder="Managed by the OAuth backend after Connect"
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono focus:outline-none focus:ring-1 focus:ring-[#0000ee] disabled:bg-neutral-50 disabled:text-neutral-500"
                   />
                   <Lock className="w-3.5 h-3.5 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 </div>
@@ -403,7 +544,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
             {/* Test Connection Button */}
             <div className="pt-3 border-t border-[rgba(24,144,255,0.15)] flex items-center justify-between">
               <span className="text-[11px] text-neutral-500">
-                Credentials are saved locally in your browser storage.
+                Tokens live in the local OAuth backend (.secrets/connections.json) — the browser only sees a masked preview.
               </span>
 
               <button
