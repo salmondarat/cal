@@ -1,4 +1,5 @@
 import { MediaItem } from '../types';
+import { toUserMessage } from './errorMessages';
 
 const DB_NAME = 'RelateSocialMediaDB';
 const DB_VERSION = 1;
@@ -46,7 +47,10 @@ async function uploadBufferToServer(date: string, name: string, data: ArrayBuffe
     `/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`,
     { method: 'POST', body: blob },
   );
-  if (!res.ok) throw new Error(`Media upload failed: ${(await res.json().catch(() => ({})) as any).error || res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(toUserMessage((body as any)?.error, 'The media upload did not finish. Please try again.'));
+  }
   const saved: any = await res.json();
   return {
     id: `${saved.date}/${saved.name}`,
@@ -80,6 +84,8 @@ function serverItemToFileEntry(entry: any): MediaItem {
     id: `${entry.date}/${entry.name}`,
     name: entry.name,
     url: entry.url,
+    playbackUrl: entry.playUrl,
+    thumbnailUrl: entry.thumbUrl,
     size: entry.size,
     type: entry.type,
     uploadedAt: entry.modifiedAt,
@@ -125,8 +131,8 @@ export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: strin
     try {
       await saveToServer(item, date);
       return;
-    } catch (e) {
-      console.warn('Universal media storage upload failed, falling back to IndexedDB:', e);
+    } catch {
+      console.warn('Media storage is unavailable right now; saving in this browser instead.');
     }
   }
   try {
@@ -143,8 +149,8 @@ export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: strin
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
-  } catch (e) {
-    console.warn('Failed to save to IndexedDB, falling back to localStorage metadata:', e);
+  } catch {
+    console.warn('Browser storage is unavailable; saving media details locally instead.');
     saveToLocalStorageFallback(item);
   }
 }
@@ -154,8 +160,8 @@ export async function getAllStoredMedia(): Promise<MediaItem[]> {
     try {
       const items = await getAllFromServer();
       return items;
-    } catch (e) {
-      console.warn('Universal media scan failed, falling back to IndexedDB:', e);
+    } catch {
+      console.warn('Media storage is unavailable right now; using this browser instead.');
     }
   }
   try {
@@ -169,8 +175,8 @@ export async function getAllStoredMedia(): Promise<MediaItem[]> {
     });
 
     return items;
-  } catch (e) {
-    console.warn('Falling back to local storage media:', e);
+  } catch {
+    console.warn('Showing media saved in this browser instead.');
     return loadFromLocalStorageFallback();
   }
 }
@@ -181,7 +187,7 @@ export async function deleteStoredMediaItem(id: string): Promise<void> {
     const res = await fetch(`/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`, {
       method: 'DELETE',
     });
-    if (!res.ok) console.warn('Failed to delete from universal storage:', await res.text());
+    if (!res.ok) console.warn('That media item could not be removed from shared storage.');
     return;
   }
   try {
@@ -193,8 +199,8 @@ export async function deleteStoredMediaItem(id: string): Promise<void> {
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
-  } catch (e) {
-    console.warn('Failed to delete from IndexedDB:', e);
+  } catch {
+    console.warn('That media item could not be removed from browser storage.');
     deleteFromLocalStorageFallback(id);
   }
 }
@@ -214,8 +220,8 @@ export async function clearAllStoredMedia(): Promise<void> {
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
-  } catch (e) {
-    console.warn('Failed to clear IndexedDB:', e);
+  } catch {
+    console.warn('Browser media storage could not be cleared.');
   }
 }
 
@@ -227,8 +233,8 @@ function saveToLocalStorageFallback(item: MediaItem) {
     const existing = loadFromLocalStorageFallback();
     const updated = [item, ...existing.filter((m) => m.id !== item.id)];
     localStorage.setItem(LS_FALLBACK_KEY, JSON.stringify(updated));
-  } catch (e) {
-    console.error('LocalStorage write error:', e);
+  } catch {
+    console.error('Media details could not be saved in this browser.');
   }
 }
 

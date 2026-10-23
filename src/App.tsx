@@ -40,8 +40,8 @@ export default function App() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(posts));
-    } catch (e) {
-      console.warn('LocalStorage save failed:', e);
+    } catch {
+      console.warn('Your schedule could not be saved in this browser.');
     }
   }, [posts]);
 
@@ -53,8 +53,8 @@ export default function App() {
       .then((items) => {
         setStoredMedia(items);
       })
-      .catch((err) => {
-        console.warn('Media loading notice:', err);
+      .catch(() => {
+        console.warn('Media could not be loaded right now.');
       });
   }, []);
 
@@ -72,6 +72,7 @@ export default function App() {
   const [editingPost, setEditingPost] = useState<ScheduledPost | null>(null);
   const [quickAddDate, setQuickAddDate] = useState<string | undefined>(undefined);
   const [quickAddTime, setQuickAddTime] = useState<string | undefined>(undefined);
+  const [quickAddMedia, setQuickAddMedia] = useState<MediaItem[] | undefined>(undefined);
 
   const [isSimulatorOpen, setIsSimulatorOpen] = useState(false);
   const [activeSimulatorPost, setActiveSimulatorPost] = useState<ScheduledPost | null>(null);
@@ -174,6 +175,7 @@ export default function App() {
       }
     });
     setEditingPost(null);
+    setQuickAddMedia(undefined);
   };
 
   // Bulk Campaign Series scheduler handler
@@ -227,6 +229,7 @@ export default function App() {
     setEditingPost(null);
     setQuickAddDate(dateStr);
     setQuickAddTime(timeStr || '10:00');
+    setQuickAddMedia(undefined);
     setIsComposerOpen(true);
   };
 
@@ -235,6 +238,7 @@ export default function App() {
     setEditingPost(post);
     setQuickAddDate(post.scheduledDate);
     setQuickAddTime(post.scheduledTime);
+    setQuickAddMedia(undefined);
     setIsComposerOpen(true);
   };
 
@@ -330,6 +334,7 @@ export default function App() {
           setEditingPost(null);
           setQuickAddDate(undefined);
           setQuickAddTime(undefined);
+          setQuickAddMedia(undefined);
           setIsComposerOpen(true);
         }}
         onOpenSimulator={() => {
@@ -419,11 +424,13 @@ export default function App() {
         onClose={() => {
           setIsComposerOpen(false);
           setEditingPost(null);
+          setQuickAddMedia(undefined);
         }}
         onSavePost={handleSavePost}
         initialPost={editingPost}
         initialDate={quickAddDate}
         initialTime={quickAddTime}
+        initialMedia={quickAddMedia}
         availableStoredMedia={storedMedia}
         onPreviewPost={(post) => {
           setActiveSimulatorPost(post);
@@ -468,6 +475,7 @@ export default function App() {
           setEditingPost(null);
           setQuickAddDate(new Date().toISOString().split('T')[0]);
           setQuickAddTime('10:00');
+          setQuickAddMedia([item]);
           setIsComposerOpen(true);
         }}
       />

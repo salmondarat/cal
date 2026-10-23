@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 import express from 'express';
 import 'dotenv/config';
 
@@ -38,14 +41,24 @@ interface StoredConnection {
   metaPages?: { id: string; name: string; accessToken: string; instagramId?: string; instagramUsername?: string }[];
 }
 
-type Store = Partial<Record<'meta' | 'tiktok' | 'youtube' | 'threads' | 'instagram', StoredConnection>>;
+interface Store extends Partial<Record<'meta' | 'tiktok' | 'youtube' | 'threads' | 'instagram', StoredConnection>> {
+  instagramAccounts?: Record<string, StoredConnection>;
+  activeInstagramId?: string;
+}
 
 function loadStore(): Store {
+  let store: Store = {};
   try {
-    return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
-  } catch {
-    return {};
+    store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
+  } catch {}
+  // Migrate the legacy single Instagram slot into the multi-account map.
+  if (store.instagram) {
+    const legacy = store.instagram;
+    const key = legacy.accountIds[0];
+    store.instagramAccounts = { ...(store.instagramAccounts || {}), [key]: legacy };
+    store.activeInstagramId = store.activeInstagramId || key;
   }
+  return store;
 }
 
 function saveStore(store: Store) {
@@ -86,11 +99,41 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+function logDetail(scope: string, detail: unknown) {
+  const text = detail instanceof Error ? detail.message : typeof detail === 'string' ? detail : 'unknown error';
+  console.warn(`[relate-oauth] ${scope}: ${text}`);
+}
+
+function connectionFailure(platformName: string): string {
+  return `${platformName} could not finish signing in. Please try again. If it keeps failing, disconnect the account and reconnect.`;
+}
+
+function providerFailure(provider: string, detail: string | undefined): string {
+  const text = (detail || '').toLowerCase();
+  if (/access_denied|user (denied|cancel)|cancelled|canceled|press cancel/.test(text)) {
+    return 'Sign-in was cancelled. No changes were made.';
+  }
+  if (/invalid|unauthorized|not found|disabled|misconfigur/.test(text)) {
+    return `${provider} rejected this app's sign-in settings. Check the app configuration and try again.`;
+  }
+  if (/redirect|callback|uri/.test(text)) {
+    return `${provider} could not return to this app. Check that the callback address in the app settings matches this app.`;
+  }
+  if (/permission|scope|consent/.test(text)) {
+    return 'Some required permissions were not approved. Approve all requested access and try again.';
+  }
+  if (/expired|session|timeout/.test(text)) {
+    return 'The sign-in session expired. Please start again.';
+  }
+  return connectionFailure(provider);
+}
+
 function missingConfig(res: express.Response, keys: string[]) {
   const missing = keys.filter((k) => !process.env[k]);
   if (missing.length) {
+    logDetail('missing configuration', missing.join(', '));
     res.status(400).json({
-      error: `Missing environment configuration: ${missing.join(', ')}. See docs/platform-setup.md`,
+      error: 'This platform is not fully configured yet. Add its app credentials to the backend, then try again.',
     });
     return true;
   }
@@ -107,21 +150,38 @@ setTimeout(() => window.close(), 1500);
 </script></body></html>`;
 }
 
+function toPublicConnection(conn: StoredConnection) {
+  return {
+    connected: true,
+    maskedToken: maskToken(conn.accessToken),
+    accountIds: conn.accountIds,
+    accountNames: conn.accountNames,
+    scopes: conn.scopes,
+    connectedAt: conn.connectedAt,
+    expiresAt: conn.expiresAt,
+  };
+}
+
 function publicConnections() {
   const store = loadStore();
   const out: Record<string, any> = {};
   for (const [platform, conn] of Object.entries(store)) {
-    if (!conn) continue;
-    out[platform] = {
-      connected: true,
-      maskedToken: maskToken(conn.accessToken),
-      accountIds: conn.accountIds,
-      accountNames: conn.accountNames,
-      scopes: conn.scopes,
-      connectedAt: conn.connectedAt,
-      expiresAt: conn.expiresAt,
-    };
+    if (platform === 'instagramAccounts' || platform === 'activeInstagramId' || !conn) continue;
+    out[platform] = toPublicConnection(conn as StoredConnection);
   }
+
+  const igAccounts = store.instagramAccounts || {};
+  const activeIgId = store.activeInstagramId;
+  if (activeIgId && igAccounts[activeIgId]) {
+    out.instagram = toPublicConnection(igAccounts[activeIgId]);
+  }
+  out.instagramAccounts = Object.entries(igAccounts).map(([id, conn]) => ({
+    id,
+    accountName: conn.accountNames[0],
+    connectedAt: conn.connectedAt,
+    expiresAt: conn.expiresAt,
+    active: id === activeIgId,
+  }));
   return out;
 }
 
@@ -155,16 +215,22 @@ async function graphGet(url: string, token: string): Promise<any> {
   const sep = url.includes('?') ? '&' : '?';
   const res = await fetch(`${url}${sep}access_token=${encodeURIComponent(token)}`);
   const json: any = await res.json();
-  if (json.error) throw new Error(`Graph API: ${json.error.message}`);
+  if (json.error) {
+    logDetail('Meta request failed', json.error.message);
+    throw new Error('Meta could not complete the request. Please try again.');
+  }
   return json;
 }
 
 app.get('/auth/meta/callback', async (req, res) => {
   const { code, state, error_description } = req.query as Record<string, string>;
-  if (error_description) return res.send(callbackHtml('Meta', false, error_description));
+  if (error_description) {
+    logDetail('Meta sign-in declined', error_description);
+    return res.send(callbackHtml('Meta', false, providerFailure('Meta', error_description)));
+  }
   const pending = consumeState(state);
   if (!code || !pending || pending.platform !== 'meta') {
-    return res.send(callbackHtml('Meta', false, 'Invalid or expired OAuth state.'));
+    return res.send(callbackHtml('Meta', false, 'The sign-in link expired. Please start again.'));
   }
   try {
     const exchange = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`, {
@@ -178,7 +244,10 @@ app.get('/auth/meta/callback', async (req, res) => {
       }),
     });
     const shortLived: any = await exchange.json();
-    if (shortLived.error) throw new Error(shortLived.error.message);
+    if (shortLived.error) {
+      logDetail('Meta token exchange failed', shortLived.error.message);
+      throw new Error(connectionFailure('Meta'));
+    }
 
     const longRes = await fetch(
       `https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token?grant_type=fb_exchange_token` +
@@ -186,7 +255,10 @@ app.get('/auth/meta/callback', async (req, res) => {
         `&fb_exchange_token=${encodeURIComponent(shortLived.access_token)}`,
     );
     const longLived: any = await longRes.json();
-    if (longLived.error) throw new Error(longLived.error.message);
+    if (longLived.error) {
+      logDetail('Meta long-lived token exchange failed', longLived.error.message);
+      throw new Error(connectionFailure('Meta'));
+    }
     const userToken = longLived.access_token;
 
     const me = await graphGet(`https://graph.facebook.com/${GRAPH_VERSION}/me?fields=id,name`, userToken);
@@ -244,7 +316,8 @@ app.get('/auth/meta/callback', async (req, res) => {
     saveStore(store);
     res.send(callbackHtml('Meta', true, `Connected as <b>${me.name}</b> with ${pages.length} page(s).`));
   } catch (err: any) {
-    res.send(callbackHtml('Meta', false, err.message));
+    logDetail('Meta sign-in failed', err);
+    res.send(callbackHtml('Meta', false, connectionFailure('Meta')));
   }
 });
 
@@ -270,10 +343,13 @@ app.get('/auth/tiktok/start', (_req, res) => {
 
 app.get('/auth/tiktok/callback', async (req, res) => {
   const { code, state, error } = req.query as Record<string, string>;
-  if (error) return res.send(callbackHtml('TikTok', false, error));
+  if (error) {
+    logDetail('TikTok sign-in declined', error);
+    return res.send(callbackHtml('TikTok', false, providerFailure('TikTok', error)));
+  }
   const pending = consumeState(state);
   if (!code || !pending || pending.platform !== 'tiktok') {
-    return res.send(callbackHtml('TikTok', false, 'Invalid or expired OAuth state.'));
+    return res.send(callbackHtml('TikTok', false, 'The sign-in link expired. Please start again.'));
   }
   try {
     const tokenRes = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
@@ -290,7 +366,8 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     });
     const token: any = await tokenRes.json();
     if (token.error || !token.access_token) {
-      throw new Error(token.error_description || token.error || 'TikTok token exchange failed');
+      logDetail('TikTok token exchange failed', token.error_description || token.error);
+      throw new Error(connectionFailure('TikTok'));
     }
 
     const infoRes = await fetch(
@@ -299,7 +376,10 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     );
     const info: any = await infoRes.json();
     const user = info.data?.user;
-    if (!user) throw new Error(info.error?.message || 'Could not read TikTok profile.');
+    if (!user) {
+      logDetail('TikTok profile request failed', info.error?.message);
+      throw new Error(connectionFailure('TikTok'));
+    }
 
     const store = loadStore();
     store.tiktok = {
@@ -315,7 +395,8 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     saveStore(store);
     res.send(callbackHtml('TikTok', true, `Connected as <b>${user.display_name}</b>.`));
   } catch (err: any) {
-    res.send(callbackHtml('TikTok', false, err.message));
+    logDetail('TikTok sign-in failed', err);
+    res.send(callbackHtml('TikTok', false, connectionFailure('TikTok')));
   }
 });
 
@@ -344,10 +425,13 @@ app.get('/auth/google/start', (_req, res) => {
 
 app.get('/auth/google/callback', async (req, res) => {
   const { code, state, error, error_description } = req.query as Record<string, string>;
-  if (error) return res.send(callbackHtml('YouTube', false, error_description || error));
+  if (error) {
+    logDetail('YouTube sign-in declined', error_description || error);
+    return res.send(callbackHtml('YouTube', false, providerFailure('Google', error_description || error)));
+  }
   const pending = consumeState(state);
   if (!code || !pending || pending.platform !== 'google') {
-    return res.send(callbackHtml('YouTube', false, 'Invalid or expired OAuth state.'));
+    return res.send(callbackHtml('YouTube', false, 'The sign-in link expired. Please start again.'));
   }
   try {
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -362,14 +446,20 @@ app.get('/auth/google/callback', async (req, res) => {
       }),
     });
     const token: any = await tokenRes.json();
-    if (token.error) throw new Error(`${token.error}: ${token.error_description || ''}`);
+    if (token.error) {
+      logDetail('YouTube token exchange failed', `${token.error}: ${token.error_description || ''}`);
+      throw new Error(connectionFailure('YouTube'));
+    }
 
     const channelsRes = await fetch(
       'https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails,statistics&mine=true',
       { headers: { Authorization: `Bearer ${token.access_token}` } },
     );
     const channels: any = await channelsRes.json();
-    if (channels.error) throw new Error(`YouTube Data API: ${channels.error.message}`);
+    if (channels.error) {
+      logDetail('YouTube channel request failed', channels.error.message);
+      throw new Error(connectionFailure('YouTube'));
+    }
     const items = channels.items || [];
     if (!items.length) {
       return res.send(callbackHtml('YouTube', false, 'Account authorized, but it owns no YouTube channel. Create a channel first, then reconnect.'));
@@ -389,7 +479,8 @@ app.get('/auth/google/callback', async (req, res) => {
     saveStore(store);
     res.send(callbackHtml('YouTube', true, `Connected channel <b>${items[0].snippet.title}</b>.`));
   } catch (err: any) {
-    res.send(callbackHtml('YouTube', false, err.message));
+    logDetail('YouTube sign-in failed', err);
+    res.send(callbackHtml('YouTube', false, connectionFailure('YouTube')));
   }
 });
 
@@ -406,8 +497,9 @@ function threadsRedirectUri(): string {
 
 app.get('/auth/threads/start', (_req, res) => {
   if (!THREADS_APP_ID || !THREADS_APP_SECRET) {
+    logDetail('missing configuration', 'Threads app credentials');
     res.status(400).json({
-      error: 'Missing THREADS_APP_ID / THREADS_APP_SECRET (falls back to META_APP_ID / META_APP_SECRET). See docs/platform-setup.md',
+      error: 'Threads is not fully configured yet. Add its app credentials to the backend, then try again.',
     });
     return;
   }
@@ -425,10 +517,13 @@ app.get('/auth/threads/start', (_req, res) => {
 
 app.get('/auth/threads/callback', async (req, res) => {
   const { code, state, error_description } = req.query as Record<string, string>;
-  if (error_description) return res.send(callbackHtml('Threads', false, error_description));
+  if (error_description) {
+    logDetail('Threads sign-in declined', error_description);
+    return res.send(callbackHtml('Threads', false, providerFailure('Threads', error_description)));
+  }
   const pending = consumeState(state);
   if (!code || !pending || pending.platform !== 'threads') {
-    return res.send(callbackHtml('Threads', false, 'Invalid or expired OAuth state.'));
+    return res.send(callbackHtml('Threads', false, 'The sign-in link expired. Please start again.'));
   }
   try {
     const exchange = await fetch('https://graph.threads.net/oauth/access_token', {
@@ -443,7 +538,10 @@ app.get('/auth/threads/callback', async (req, res) => {
       }),
     });
     const short: any = await exchange.json();
-    if (short.error) throw new Error(short.error.message);
+    if (short.error) {
+      logDetail('Threads token exchange failed', short.error.message);
+      throw new Error(connectionFailure('Threads'));
+    }
 
     const longRes = await fetch(
       'https://graph.threads.net/access_token?grant_type=th_exchange_token' +
@@ -451,14 +549,20 @@ app.get('/auth/threads/callback', async (req, res) => {
         `&access_token=${encodeURIComponent(short.access_token)}`,
     );
     const long: any = await longRes.json();
-    if (long.error) throw new Error(long.error.message);
+    if (long.error) {
+      logDetail('Threads long-lived token exchange failed', long.error.message);
+      throw new Error(connectionFailure('Threads'));
+    }
 
     const infoRes = await fetch(
       'https://graph.threads.net/v1.0/me?fields=id,username,threads_profile_picture_url',
       { headers: { Authorization: `Bearer ${long.access_token}` } },
     );
     const info: any = await infoRes.json();
-    if (info.error) throw new Error(info.error.message);
+    if (info.error) {
+      logDetail('Threads profile request failed', info.error.message);
+      throw new Error(connectionFailure('Threads'));
+    }
 
     const store = loadStore();
     store.threads = {
@@ -473,7 +577,8 @@ app.get('/auth/threads/callback', async (req, res) => {
     saveStore(store);
     res.send(callbackHtml('Threads', true, `Connected as <b>@${info.username}</b>.`));
   } catch (err: any) {
-    res.send(callbackHtml('Threads', false, err.message));
+    logDetail('Threads sign-in failed', err);
+    res.send(callbackHtml('Threads', false, connectionFailure('Threads')));
   }
 });
 
@@ -483,8 +588,9 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
 
 app.get('/auth/instagram/start', (_req, res) => {
   if (!IG_APP_ID || !IG_APP_SECRET) {
+    logDetail('missing configuration', 'Instagram app credentials');
     res.status(400).json({
-      error: 'Missing IG_APP_ID / IG_APP_SECRET (falls back to THREADS_* then META_*). See docs/platform-setup.md',
+      error: 'Instagram is not fully configured yet. Add its app credentials to the backend, then try again.',
     });
     return;
   }
@@ -497,16 +603,20 @@ app.get('/auth/instagram/start', (_req, res) => {
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     '&response_type=code' +
     `&scope=${encodeURIComponent(IG_SCOPES.join(','))}` +
+    '&force_reauth=true' +
     `&state=${state}`;
   res.redirect(url);
 });
 
 app.get('/auth/instagram/callback', async (req, res) => {
   const { code, state, error_message, error_type } = req.query as Record<string, string>;
-  if (error_message || error_type) return res.send(callbackHtml('Instagram', false, error_message || error_type));
+  if (error_message || error_type) {
+    logDetail('Instagram sign-in declined', error_message || error_type);
+    return res.send(callbackHtml('Instagram', false, providerFailure('Instagram', error_message || error_type)));
+  }
   const pending = consumeState(state);
   if (!code || !pending || pending.platform !== 'instagram') {
-    return res.send(callbackHtml('Instagram', false, 'Invalid or expired OAuth state.'));
+    return res.send(callbackHtml('Instagram', false, 'The sign-in link expired. Please start again.'));
   }
   try {
     const exchange = await fetch('https://api.instagram.com/oauth/access_token', {
@@ -521,7 +631,10 @@ app.get('/auth/instagram/callback', async (req, res) => {
       }),
     });
     const short: any = await exchange.json();
-    if (short.error_message) throw new Error(`${short.error_type || 'instagram'}: ${short.error_message}`);
+    if (short.error_message) {
+      logDetail('Instagram token exchange failed', `${short.error_type || 'instagram'}: ${short.error_message}`);
+      throw new Error(connectionFailure('Instagram'));
+    }
 
     const longRes = await fetch(
       `https://graph.instagram.com/${GRAPH_VERSION}/access_token?grant_type=ig_exchange_token` +
@@ -529,17 +642,23 @@ app.get('/auth/instagram/callback', async (req, res) => {
         `&access_token=${encodeURIComponent(short.access_token)}`,
     );
     const long: any = await longRes.json();
-    if (long.error_message) throw new Error(long.error_message);
+    if (long.error_message) {
+      logDetail('Instagram long-lived token exchange failed', long.error_message);
+      throw new Error(connectionFailure('Instagram'));
+    }
 
     const meRes = await fetch(
       `https://graph.instagram.com/${GRAPH_VERSION}/me?fields=user_id,username`,
       { headers: { Authorization: `Bearer ${long.access_token}` } },
     );
     const me: any = await meRes.json();
-    if (me.error) throw new Error(me.error.message);
+    if (me.error) {
+      logDetail('Instagram profile request failed', me.error.message);
+      throw new Error(connectionFailure('Instagram'));
+    }
 
     const store = loadStore();
-    store.instagram = {
+    const igAccount: StoredConnection = {
       accessToken: long.access_token,
       tokenType: 'ig_long_lived_user',
       expiresAt: Date.now() + (long.expires_in ? long.expires_in * 1000 : 58 * 86400 * 1000),
@@ -548,10 +667,15 @@ app.get('/auth/instagram/callback', async (req, res) => {
       scopes: IG_SCOPES,
       connectedAt: new Date().toISOString(),
     };
+    const igId = igAccount.accountIds[0];
+    store.instagramAccounts = { ...(store.instagramAccounts || {}), [igId]: igAccount };
+    store.activeInstagramId = igId;
+    store.instagram = igAccount;
     saveStore(store);
     res.send(callbackHtml('Instagram', true, `Connected as <b>@${me.username}</b>.`));
   } catch (err: any) {
-    res.send(callbackHtml('Instagram', false, err.message));
+    logDetail('Instagram sign-in failed', err);
+    res.send(callbackHtml('Instagram', false, connectionFailure('Instagram')));
   }
 });
 
@@ -574,6 +698,370 @@ const MEDIA_MIME: Record<string, string> = {
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
 };
+
+// ---------- Thumbnails (sharp, cached on disk) ----------
+
+const THUMB_DIR = path.join(DATA_DIR, 'thumbnails');
+const THUMB_WIDTH = 480;
+const THUMB_CONCURRENCY = 4;
+const THUMB_IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
+
+type SharpModule = typeof import('sharp')['default'];
+let sharpModulePromise: Promise<SharpModule | null> | null = null;
+
+function loadSharp(): Promise<SharpModule | null> {
+  if (!sharpModulePromise) {
+    sharpModulePromise = import('sharp')
+      .then((mod) => mod.default)
+      .catch((err) => {
+        logDetail('thumbnail support unavailable (restart the backend after installing sharp)', err);
+        return null;
+      });
+  }
+  return sharpModulePromise;
+}
+
+let thumbActive = 0;
+const thumbWaiters: (() => void)[] = [];
+
+async function withThumbSlot<T>(task: () => Promise<T>): Promise<T> {
+  if (thumbActive >= THUMB_CONCURRENCY) {
+    await new Promise<void>((resolve) => thumbWaiters.push(resolve));
+  }
+  thumbActive++;
+  try {
+    return await task();
+  } finally {
+    thumbActive--;
+    thumbWaiters.shift()?.();
+  }
+}
+
+function streamFileWithRange(req: express.Request, res: express.Response, abs: string, mime: string, st: fs.Stats) {
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'no-cache');
+
+  const range = req.headers.range;
+  const match = typeof range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(range) : null;
+  if (match && (match[1] || match[2])) {
+    const start = match[1] ? Number(match[1]) : Math.max(0, st.size - Number(match[2]));
+    const end = match[1] && match[2] ? Math.min(Number(match[2]), st.size - 1) : st.size - 1;
+    if (start > end || start >= st.size) {
+      res.setHeader('Content-Range', `bytes */${st.size}`);
+      return res.status(416).end();
+    }
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${st.size}`);
+    res.setHeader('Content-Length', String(end - start + 1));
+    return fs.createReadStream(abs, { start, end }).pipe(res);
+  }
+
+  res.setHeader('Content-Length', String(st.size));
+  fs.createReadStream(abs).pipe(res);
+}
+
+async function serveThumbnail(req: express.Request, res: express.Response, abs: string) {
+  const ext = path.extname(abs).toLowerCase();
+  if (!THUMB_IMAGE_EXT.has(ext)) {
+    return res.status(415).json({ error: 'Thumbnails are only available for images.' });
+  }
+
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That file could not be found.' });
+  }
+  if (!st.isFile()) return res.status(404).json({ error: 'That file could not be found.' });
+
+  const requested = Number(req.query.w);
+  const width = Number.isFinite(requested) && requested > 0
+    ? Math.min(1200, Math.max(64, Math.round(requested)))
+    : THUMB_WIDTH;
+
+  const sharp = await loadSharp();
+  if (!sharp) {
+    // No sharp installed yet: serve the original so the UI keeps working.
+    return streamFileWithRange(req, res, abs, MEDIA_MIME[ext] || 'application/octet-stream', st);
+  }
+
+  const key = crypto.createHash('sha1').update(`${abs}|${st.mtimeMs}|${st.size}|${width}`).digest('hex');
+  const cachedFile = path.join(THUMB_DIR, `${key}.webp`);
+
+  try {
+    const cached = await fs.promises.readFile(cachedFile);
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Length', String(cached.length));
+    return res.end(cached);
+  } catch {}
+
+  try {
+    const buf = await withThumbSlot(async () => {
+      await fs.promises.mkdir(THUMB_DIR, { recursive: true });
+      return sharp(abs, { animated: false, failOn: 'none' })
+        .rotate()
+        .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 78 })
+        .toBuffer();
+    });
+    fs.promises.writeFile(cachedFile, buf).catch((err) => logDetail('thumbnail cache write failed', err));
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Length', String(buf.length));
+    res.end(buf);
+  } catch (err) {
+    logDetail('thumbnail generation failed', err);
+    streamFileWithRange(req, res, abs, MEDIA_MIME[ext] || 'application/octet-stream', st);
+  }
+}
+
+function isThumbnailableImage(name: string): boolean {
+  return THUMB_IMAGE_EXT.has(path.extname(name).toLowerCase());
+}
+
+// ---------- Browser-playable video (ffmpeg, cached remux) ----------
+
+const execFileAsync = promisify(execFile);
+const nodeRequire = createRequire(import.meta.url);
+const STREAM_DIR = path.join(DATA_DIR, 'streams');
+const TRANSCODE_TIMEOUT = 15 * 60 * 1000;
+const PLAYABLE_VIDEO_CODECS = new Set(['h264', 'vp8', 'vp9', 'av1']);
+// Re-encoding a huge clip on demand is too slow to be useful in the preview.
+const MAX_VIDEO_REENCODE_BYTES = 2 * 1024 * 1024 * 1024;
+
+interface MediaStreamInfo {
+  codec_name?: string;
+  profile?: string;
+}
+
+interface FfmpegTools {
+  ffmpeg: string;
+  ffprobe: string;
+  source: 'bundled' | 'system';
+}
+
+let ffmpegTools: FfmpegTools | null | undefined;
+const probeCache = new Map<string, { video?: MediaStreamInfo; audio?: MediaStreamInfo } | null>();
+const transcodeJobs = new Map<string, Promise<string>>();
+
+function bundledFfmpeg(): FfmpegTools | null {
+  try {
+    const ff = nodeRequire('@ffmpeg-installer/ffmpeg');
+    const fp = nodeRequire('@ffprobe-installer/ffprobe');
+    if (ff?.path && fp?.path) return { ffmpeg: ff.path, ffprobe: fp.path, source: 'bundled' as const };
+  } catch {}
+  return null;
+}
+
+async function detectFfmpeg(): Promise<FfmpegTools | null> {
+  if (ffmpegTools !== undefined) return ffmpegTools;
+
+  const bundled = bundledFfmpeg();
+  if (bundled) {
+    try {
+      await execFileAsync(bundled.ffmpeg, ['-version'], { timeout: 15000, windowsHide: true });
+      ffmpegTools = bundled;
+      return ffmpegTools;
+    } catch (err) {
+      logDetail('bundled ffmpeg unusable, trying system ffmpeg', err);
+    }
+  }
+
+  for (const [ffmpeg, ffprobe] of [
+    ['ffmpeg', 'ffprobe'],
+    ['ffmpeg.exe', 'ffprobe.exe'],
+  ]) {
+    try {
+      await execFileAsync(ffmpeg, ['-version'], { timeout: 15000, windowsHide: true });
+      ffmpegTools = { ffmpeg, ffprobe, source: 'system' };
+      return ffmpegTools;
+    } catch {}
+  }
+  ffmpegTools = null;
+  return null;
+}
+
+async function probeMediaStreams(abs: string, st: fs.Stats) {
+  const key = `${abs}|${st.mtimeMs}|${st.size}`;
+  if (probeCache.has(key)) return probeCache.get(key) ?? null;
+  const tools = await detectFfmpeg();
+  if (!tools) return null;
+  try {
+    const { stdout } = await execFileAsync(
+      tools.ffprobe,
+      ['-v', 'error', '-print_format', 'json', '-show_streams', abs],
+      { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+    );
+    const streams: any[] = JSON.parse(stdout).streams || [];
+    const result = {
+      video: streams.find((s) => s.codec_type === 'video'),
+      audio: streams.find((s) => s.codec_type === 'audio'),
+    };
+    probeCache.set(key, result);
+    return result;
+  } catch (err) {
+    logDetail('media probe failed', err);
+    return null;
+  }
+}
+
+// Chrome cannot decode HE-AAC/xHE-AAC audio, so it greys out the volume control.
+// An unrecognised AAC profile is treated as unsafe and normalised to AAC-LC.
+function audioNeedsRemux(audio?: MediaStreamInfo): boolean {
+  if (!audio?.codec_name) return false;
+  if (audio.codec_name === 'aac') return !/^lc$/i.test(audio.profile || '');
+  return !['aac', 'mp3', 'opus', 'vorbis'].includes(audio.codec_name);
+}
+
+function videoNeedsRemux(video?: MediaStreamInfo): boolean {
+  return Boolean(video?.codec_name) && !PLAYABLE_VIDEO_CODECS.has(video!.codec_name!);
+}
+
+async function ensurePlayableCopy(abs: string, st: fs.Stats, fixAudio: boolean, fixVideo: boolean): Promise<string> {
+  const key = crypto
+    .createHash('sha1')
+    .update(`v2|${abs}|${st.mtimeMs}|${st.size}|${fixAudio ? 'a' : ''}${fixVideo ? 'v' : ''}`)
+    .digest('hex');
+  const outFile = path.join(STREAM_DIR, `${key}.mp4`);
+  if (fs.existsSync(outFile)) return outFile;
+
+  const running = transcodeJobs.get(key);
+  if (running) return running;
+
+  const tools = await detectFfmpeg();
+  if (!tools) throw new Error('ffmpeg is not available on this machine.');
+
+  const job = (async () => {
+    await fs.promises.mkdir(STREAM_DIR, { recursive: true });
+    const tmpFile = `${outFile}.${process.pid}.tmp.mp4`;
+    const args = ['-nostdin', '-loglevel', 'error', '-y', '-i', abs, '-map', '0:v:0', '-map', '0:a:0?', '-sn'];
+    if (fixVideo) {
+      // Cap the long edge so 4K clips do not take minutes to re-encode.
+      const cap = st.size > 200 * 1024 * 1024 ? 1280 : 1920;
+      const scale = `scale=w='if(gt(iw\\,ih)\\,min(${cap}\\,iw)\\,-2)':h='if(gt(iw\\,ih)\\,-2\\,min(${cap}\\,ih))'`;
+      args.push(
+        '-c:v',
+        'libx264',
+        '-preset',
+        st.size > 200 * 1024 * 1024 ? 'ultrafast' : 'veryfast',
+        '-crf',
+        st.size > 200 * 1024 * 1024 ? '30' : '24',
+        '-vf',
+        scale,
+        '-pix_fmt',
+        'yuv420p',
+      );
+    } else {
+      args.push('-c:v', 'copy');
+    }
+    if (fixAudio) args.push('-c:a', 'aac', '-profile:a', 'aac_low', '-ac', '2');
+    else args.push('-c:a', 'copy');
+    args.push('-max_muxing_queue_size', '4096', '-movflags', '+faststart', tmpFile);
+    await execFileAsync(tools.ffmpeg, args, {
+      timeout: TRANSCODE_TIMEOUT,
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    });
+    await fs.promises.rename(tmpFile, outFile);
+    return outFile;
+  })().finally(() => transcodeJobs.delete(key));
+
+  transcodeJobs.set(key, job);
+  return job;
+}
+
+async function servePlayable(req: express.Request, res: express.Response, abs: string, mime: string) {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That file could not be found.' });
+  }
+
+  const info = await probeMediaStreams(abs, st);
+  if (!info) return streamFileWithRange(req, res, abs, mime, st);
+
+  // ?force=1 normalises audio even when the probe looked fine (browser refused to decode it).
+  const force = req.query.force === '1' || req.query.force === 'true';
+  const fixAudio = force || audioNeedsRemux(info.audio);
+  let fixVideo = videoNeedsRemux(info.video);
+  if (fixVideo && st.size > MAX_VIDEO_REENCODE_BYTES) fixVideo = false;
+  if (!fixAudio && !fixVideo) return streamFileWithRange(req, res, abs, mime, st);
+
+  try {
+    const copy = await ensurePlayableCopy(abs, st, fixAudio, fixVideo);
+    return streamFileWithRange(req, res, copy, 'video/mp4', fs.statSync(copy));
+  } catch (err) {
+    logDetail('playable copy failed', err);
+    return streamFileWithRange(req, res, abs, mime, st);
+  }
+}
+
+// Server-side video poster so unsupported codecs (HEVC) still get a thumbnail
+// and the grid never has to download the clip itself.
+async function serveVideoThumbnail(req: express.Request, res: express.Response, abs: string) {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That file could not be found.' });
+  }
+
+  const tools = await detectFfmpeg();
+  if (!tools) return res.status(501).json({ error: 'ffmpeg is not available for video thumbnails.' });
+
+  const requestedWidth = Number(req.query.w);
+  const width = Number.isFinite(requestedWidth) && requestedWidth > 0
+    ? Math.min(1280, Math.max(64, Math.round(requestedWidth)))
+    : THUMB_WIDTH;
+  const requestedTime = Number(req.query.t);
+  const seek = Number.isFinite(requestedTime) && requestedTime >= 0 ? Math.min(requestedTime, 60) : 1;
+
+  const key = crypto
+    .createHash('sha1')
+    .update(`vt|${abs}|${st.mtimeMs}|${st.size}|${width}|${seek}`)
+    .digest('hex');
+  const cachedFile = path.join(THUMB_DIR, `${key}.jpg`);
+
+  const sendJpeg = async (buf: Buffer) => {
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Length', String(buf.length));
+    res.end(buf);
+  };
+
+  try {
+    sendJpeg(await fs.promises.readFile(cachedFile));
+    return;
+  } catch {}
+
+  try {
+    await fs.promises.mkdir(THUMB_DIR, { recursive: true });
+    const tmpFile = `${cachedFile}.${process.pid}.tmp.jpg`;
+    await withThumbSlot(() =>
+      execFileAsync(
+        tools.ffmpeg,
+        [
+          '-nostdin', '-loglevel', 'error', '-y',
+          '-ss', String(seek),
+          '-i', abs,
+          '-frames:v', '1',
+          '-vf', `scale=w=min(${width}\\,iw):h=-2`,
+          '-q:v', '4',
+          tmpFile,
+        ],
+        { timeout: 90000, windowsHide: true },
+      ),
+    );
+    await fs.promises.rename(tmpFile, cachedFile);
+    sendJpeg(await fs.promises.readFile(cachedFile));
+  } catch (err) {
+    logDetail('video thumbnail failed', err);
+    if (!res.headersSent) res.status(502).json({ error: 'That video could not be thumbnailed.' });
+  }
+}
 
 function safeFolder(date: unknown): string | null {
   return typeof date === 'string' && DATE_FOLDER_RE.test(date) ? date : null;
@@ -641,7 +1129,7 @@ app.get('/api/storage/media/dates', (_req, res) => {
 
 app.get('/api/storage/media', (req, res) => {
   const date = safeFolder(req.query.date);
-  if (!date) return res.status(400).json({ error: 'date query must be YYYY-MM-DD' });
+  if (!date) return res.status(400).json({ error: 'Choose a valid date in YYYY-MM-DD format.' });
   const dir = path.join(MEDIA_DIR, date);
   let names: string[] = [];
   try {
@@ -661,33 +1149,73 @@ app.get('/api/storage/media', (req, res) => {
     }
     if (!st.isFile()) continue;
     const ext = path.extname(name).toLowerCase();
+    const mime = MEDIA_MIME[ext] || 'application/octet-stream';
+    const version = Math.round(st.mtimeMs);
     items.push({
       date,
       name,
       size: st.size,
-      type: MEDIA_MIME[ext] || 'application/octet-stream',
+      type: mime,
       modifiedAt: st.mtime.toISOString(),
       url: `/api/storage/media/file?date=${date}&name=${encodeURIComponent(name)}`,
+      playUrl: mime.startsWith('video/')
+        ? `/api/storage/stream?date=${date}&name=${encodeURIComponent(name)}`
+        : undefined,
+      thumbUrl: mime.startsWith('video/')
+        ? `/api/storage/video-thumbnail?date=${date}&name=${encodeURIComponent(name)}&w=${THUMB_WIDTH}&v=${version}`
+        : isThumbnailableImage(name)
+          ? `/api/storage/thumbnail?date=${date}&name=${encodeURIComponent(name)}&w=${THUMB_WIDTH}&v=${version}`
+          : undefined,
     });
   }
   res.json(items);
+});
+
+app.get('/api/storage/thumbnail', (req, res) => {
+  const date = safeFolder(req.query.date);
+  const name = safeFileName(req.query.name);
+  const abs = date && name && resolveInMediaDir(date, name);
+  if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
+  void serveThumbnail(req, res, abs);
 });
 
 app.get('/api/storage/media/file', (req, res) => {
   const date = safeFolder(req.query.date);
   const name = safeFileName(req.query.name);
   const abs = date && name && resolveInMediaDir(date, name);
-  if (!abs) return res.status(400).json({ error: 'Invalid date/name' });
+  if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
   let st: fs.Stats;
   try {
     st = fs.statSync(abs);
   } catch {
-    return res.status(404).json({ error: 'File not found' });
+    return res.status(404).json({ error: 'That file could not be found.' });
   }
-  res.setHeader('Content-Type', MEDIA_MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream');
-  res.setHeader('Content-Length', String(st.size));
-  res.setHeader('Cache-Control', 'no-cache');
-  fs.createReadStream(abs).pipe(res);
+  if (!st.isFile()) return res.status(404).json({ error: 'That file could not be found.' });
+  streamFileWithRange(
+    req,
+    res,
+    abs,
+    MEDIA_MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream',
+    st,
+  );
+});
+
+app.get('/api/storage/video-thumbnail', (req, res) => {
+  const date = safeFolder(req.query.date);
+  const name = safeFileName(req.query.name);
+  const abs = date && name && resolveInMediaDir(date, name);
+  if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
+  void serveVideoThumbnail(req, res, abs);
+});
+
+app.get('/api/storage/stream', (req, res) => {
+  const date = safeFolder(req.query.date);
+  const name = safeFileName(req.query.name);
+  const abs = date && name && resolveInMediaDir(date, name);
+  if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
+  const mime = MEDIA_MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
+  if (!mime.startsWith('video/')) return res.status(404).json({ error: 'That file is not a video.' });
+  void servePlayable(req, res, abs, mime);
 });
 
 app.post(
@@ -695,16 +1223,16 @@ app.post(
   express.raw({ type: '*/*', limit: `${MAX_MEDIA_BYTES}b` }),
   (req, res) => {
     const date = safeFolder(req.query.date);
-    if (!date) return res.status(400).json({ error: 'date query must be YYYY-MM-DD' });
+    if (!date) return res.status(400).json({ error: 'Choose a valid date in YYYY-MM-DD format.' });
     let name = safeFileName(req.query.name);
     if (!name) name = `upload-${Date.now()}`;
     const ext = path.extname(name).toLowerCase();
     if (!MEDIA_MIME[ext]) {
-      return res.status(400).json({ error: `Unsupported file type: ${ext || '(none)'}` });
+      return res.status(400).json({ error: 'That file type is not supported. Choose an image or video.' });
     }
     const buf = req.body as Buffer;
-    if (!buf?.length) return res.status(400).json({ error: 'Empty upload body' });
-    if (buf.length > MAX_MEDIA_BYTES) return res.status(413).json({ error: 'File exceeds 1GB limit' });
+    if (!buf?.length) return res.status(400).json({ error: 'No file was included in the upload.' });
+    if (buf.length > MAX_MEDIA_BYTES) return res.status(413).json({ error: 'That file is too large. Choose one under 1 GB.' });
 
     const dir = path.join(MEDIA_DIR, date);
     fs.mkdirSync(dir, { recursive: true });
@@ -728,13 +1256,313 @@ app.delete('/api/storage/media', (req, res) => {
   const date = safeFolder(req.query.date);
   const name = safeFileName(req.query.name);
   const abs = date && name && resolveInMediaDir(date, name);
-  if (!abs) return res.status(400).json({ error: 'Invalid date/name' });
+  if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
   try {
     fs.unlinkSync(abs);
     res.json({ deleted: `${date}/${name}` });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    logDetail('media delete failed', err);
+    res.status(500).json({ error: 'We could not delete that file. Please try again.' });
   }
+});
+
+// ---------- Local folder library (scan user-added folders) ----------
+
+const LIBRARY_ROOTS_FILE = path.join(DATA_DIR, 'library-roots.json');
+const LIBRARY_MEDIA_EXT = new Set([...Object.keys(MEDIA_MIME), '.avif', '.m4v']);
+const LIBRARY_MIME: Record<string, string> = {
+  ...MEDIA_MIME,
+  '.avif': 'image/avif',
+  '.m4v': 'video/x-m4v',
+};
+const LIBRARY_LIST_LIMIT = 2000;
+
+interface LibraryRoot {
+  id: string;
+  name: string;
+  path: string;
+  addedAt: string;
+}
+
+function loadLibraryRoots(): LibraryRoot[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(LIBRARY_ROOTS_FILE, 'utf8'));
+    return Array.isArray(parsed) ? parsed.filter((r: any) => typeof r?.path === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLibraryRoots(roots: LibraryRoot[]) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(LIBRARY_ROOTS_FILE, JSON.stringify(roots, null, 2));
+}
+
+function expandUserPath(input: string): string {
+  let p = input.trim().replace(/^"(.*)"$/, '$1');
+  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) {
+    p = path.join(os.homedir(), p.slice(1));
+  }
+  p = p.replace(/%([^%]+)%/g, (m, name) => process.env[name] ?? m);
+  return path.resolve(p);
+}
+
+function rootById(id: unknown): LibraryRoot | undefined {
+  return typeof id === 'string' ? loadLibraryRoots().find((r) => r.id === id) : undefined;
+}
+
+function resolveInRoot(root: LibraryRoot, rel: unknown): string | null {
+  if (typeof rel !== 'string' || rel.includes('\0')) return null;
+  const base = path.resolve(root.path);
+  const abs = path.resolve(base, rel.replace(/^[/\\]+/, ''));
+  const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const a = norm(abs);
+  const b = norm(base);
+  return a === b || a.startsWith(b + path.sep) ? abs : null;
+}
+
+function libraryMime(name: string): string | null {
+  const ext = path.extname(name).toLowerCase();
+  return LIBRARY_MEDIA_EXT.has(ext) ? LIBRARY_MIME[ext] || 'application/octet-stream' : null;
+}
+
+// ---------- Native folder picker (Windows / macOS / Linux) ----------
+
+let folderPickerBusy = false;
+
+async function pickFolderNative(): Promise<{ canceled: boolean; path?: string }> {
+  const PICKER_TIMEOUT = 5 * 60 * 1000;
+
+  if (process.platform === 'win32') {
+    const script = [
+      'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+      '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+      "$dialog.Description = 'Select a media folder'",
+      '$dialog.ShowNewFolderButton = $false',
+      'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+    ].join('; ');
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-STA', '-Command', script],
+      { timeout: PICKER_TIMEOUT, windowsHide: true },
+    );
+    const chosen = stdout.trim();
+    return chosen ? { canceled: false, path: chosen } : { canceled: true };
+  }
+
+  if (process.platform === 'darwin') {
+    try {
+      const { stdout } = await execFileAsync(
+        'osascript',
+        ['-e', 'POSIX path of (choose folder with prompt "Select a media folder")'],
+        { timeout: PICKER_TIMEOUT },
+      );
+      const chosen = stdout.trim();
+      return chosen ? { canceled: false, path: chosen } : { canceled: true };
+    } catch (err: any) {
+      const detail = `${err?.stderr || ''} ${err?.message || ''}`;
+      if (err?.killed || /cancel|-128/i.test(detail)) return { canceled: true };
+      throw err;
+    }
+  }
+
+  const candidates = [
+    { cmd: 'zenity', args: ['--file-selection', '--directory', '--title=Select a media folder'] },
+    { cmd: 'kdialog', args: ['--getexistingdirectory', os.homedir(), '--title', 'Select a media folder'] },
+  ];
+  for (const candidate of candidates) {
+    try {
+      const { stdout } = await execFileAsync(candidate.cmd, candidate.args, { timeout: PICKER_TIMEOUT });
+      const chosen = stdout.trim();
+      return chosen ? { canceled: false, path: chosen } : { canceled: true };
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') continue;
+      if (err?.killed || err?.signal || err?.code === 1) return { canceled: true };
+      throw err;
+    }
+  }
+
+  throw Object.assign(
+    new Error('No native folder picker is available. Paste the folder path instead.'),
+    { statusCode: 501 },
+  );
+}
+
+app.get('/api/library/roots', (_req, res) => {
+  res.json(
+    loadLibraryRoots().map((r) => ({ ...r, exists: fs.existsSync(r.path) })),
+  );
+});
+
+app.post('/api/library/roots', (req, res) => {
+  const raw = typeof req.body?.path === 'string' ? req.body.path : '';
+  if (!raw.trim()) return res.status(400).json({ error: 'Enter a folder path first.' });
+  const abs = expandUserPath(raw);
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That folder could not be found. Check the path and try again.' });
+  }
+  if (!st.isDirectory()) return res.status(400).json({ error: 'That path points to a file, not a folder.' });
+
+  const roots = loadLibraryRoots();
+  const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const existing = roots.find((r) => norm(path.resolve(r.path)) === norm(abs));
+  if (existing) return res.json({ ...existing, exists: true });
+
+  const id = crypto.createHash('sha1').update(norm(abs)).digest('hex').slice(0, 10);
+  const root: LibraryRoot = {
+    id,
+    name: path.basename(abs) || abs,
+    path: abs,
+    addedAt: new Date().toISOString(),
+  };
+  roots.push(root);
+  saveLibraryRoots(roots);
+  res.status(201).json({ ...root, exists: true });
+});
+
+app.delete('/api/library/roots/:id', (req, res) => {
+  const roots = loadLibraryRoots();
+  const next = roots.filter((r) => r.id !== req.params.id);
+  if (next.length === roots.length) return res.status(404).json({ error: 'That library folder is no longer available.' });
+  saveLibraryRoots(next);
+  res.json({ removed: req.params.id });
+});
+
+app.get('/api/library/list', (req, res) => {
+  const root = rootById(req.query.root);
+  if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const rel = typeof req.query.path === 'string' ? req.query.path : '';
+  const abs = resolveInRoot(root, rel);
+  if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
+
+  let names: string[];
+  try {
+    names = fs.readdirSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That folder could not be found. Check the path and try again.' });
+  }
+
+  const folders: { name: string; path: string }[] = [];
+  const files: any[] = [];
+  let truncated = false;
+  for (const name of names.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))) {
+    if (name.startsWith('.')) continue;
+    const childRel = rel ? `${rel}/${name}` : name;
+    const childAbs = path.join(abs, name);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(childAbs);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      folders.push({ name, path: childRel });
+      continue;
+    }
+    if (!st.isFile() || !libraryMime(name)) continue;
+    if (files.length >= LIBRARY_LIST_LIMIT) {
+      truncated = true;
+      continue;
+    }
+    const fileMime = libraryMime(name)!;
+    const fileUrl = `/api/library/file?root=${root.id}&path=${encodeURIComponent(childRel)}`;
+    const version = Math.round(st.mtimeMs);
+    files.push({
+      name,
+      path: childRel,
+      size: st.size,
+      type: fileMime,
+      modifiedAt: st.mtime.toISOString(),
+      url: fileUrl,
+      playUrl: fileMime.startsWith('video/')
+        ? `/api/library/stream?root=${root.id}&path=${encodeURIComponent(childRel)}`
+        : undefined,
+      thumbUrl: fileMime.startsWith('video/')
+        ? `/api/library/video-thumbnail?root=${root.id}&path=${encodeURIComponent(childRel)}&w=${THUMB_WIDTH}&v=${version}`
+        : isThumbnailableImage(name)
+          ? `/api/library/thumbnail?root=${root.id}&path=${encodeURIComponent(childRel)}&w=${THUMB_WIDTH}&v=${version}`
+          : undefined,
+    });
+  }
+
+  res.json({ root: { id: root.id, name: root.name, path: root.path }, path: rel, folders, files, truncated });
+});
+
+app.get('/api/library/thumbnail', (req, res) => {
+  const root = rootById(req.query.root);
+  if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const abs = resolveInRoot(root, req.query.path);
+  if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
+  void serveThumbnail(req, res, abs);
+});
+
+app.post('/api/library/pick-folder', async (_req, res) => {
+  if (folderPickerBusy) {
+    return res.status(409).json({ error: 'A folder picker is already open. Finish it first.' });
+  }
+  folderPickerBusy = true;
+  try {
+    const result = await pickFolderNative();
+    if (result.canceled || !result.path) return res.json({ canceled: true });
+    const abs = path.resolve(expandUserPath(result.path));
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(abs);
+    } catch {
+      return res.status(404).json({ error: `Folder not found: ${abs}` });
+    }
+    if (!st.isDirectory()) return res.status(400).json({ error: `Not a folder: ${abs}` });
+    res.json({ canceled: false, path: abs });
+  } catch (err: any) {
+    logDetail('folder picker failed', err);
+    const noPicker = err?.statusCode === 501;
+    res.status(noPicker ? 501 : 500).json({
+      error: noPicker
+        ? 'No native folder picker is available on this system. Paste the folder path instead.'
+        : 'The folder picker could not open. Paste the folder path instead.',
+    });
+  } finally {
+    folderPickerBusy = false;
+  }
+});
+
+app.get('/api/library/file', (req, res) => {
+  const root = rootById(req.query.root);
+  if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const abs = resolveInRoot(root, req.query.path);
+  if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
+
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That file could not be found.' });
+  }
+  const mime = st.isFile() ? libraryMime(abs) : null;
+  if (!mime) return res.status(404).json({ error: 'That file is not a supported image or video.' });
+
+  streamFileWithRange(req, res, abs, mime, st);
+});
+
+app.get('/api/library/video-thumbnail', (req, res) => {
+  const root = rootById(req.query.root);
+  if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const abs = resolveInRoot(root, req.query.path);
+  if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
+  void serveVideoThumbnail(req, res, abs);
+});
+
+app.get('/api/library/stream', (req, res) => {
+  const root = rootById(req.query.root);
+  if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const abs = resolveInRoot(root, req.query.path);
+  if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
+  const mime = libraryMime(abs);
+  if (!mime || !mime.startsWith('video/')) return res.status(404).json({ error: 'That file is not a supported video.' });
+  void servePlayable(req, res, abs, mime);
 });
 
 function needsRefresh(conn: StoredConnection): boolean {
@@ -744,12 +1572,12 @@ function needsRefresh(conn: StoredConnection): boolean {
 async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads' | 'instagram'): Promise<string> {
   const store = loadStore();
   const conn = store[storeKey];
-  if (!conn) throw new Error('Not connected.');
+  if (!conn) throw new Error('This account is not connected yet. Connect it first.');
   if (!needsRefresh(conn)) return conn.accessToken;
 
   let next: any;
   if (storeKey === 'tiktok') {
-    if (!conn.refreshToken) throw new Error('TikTok access token expired and no refresh token was stored — reconnect.');
+    if (!conn.refreshToken) throw new Error('Your TikTok session has expired. Reconnect TikTok to continue.');
     const res = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -761,9 +1589,12 @@ async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads' | 'in
       }),
     });
     next = await res.json();
-    if (next.error || !next.access_token) throw new Error(next.error_description || 'TikTok token refresh failed.');
+    if (next.error || !next.access_token) {
+      logDetail('TikTok token refresh failed', next.error_description || next.error);
+      throw new Error('We could not renew your TikTok session. Reconnect TikTok to continue.');
+    }
   } else if (storeKey === 'youtube') {
-    if (!conn.refreshToken) throw new Error('Google access token expired and no refresh token was stored — reconnect.');
+    if (!conn.refreshToken) throw new Error('Your Google session has expired. Reconnect YouTube to continue.');
     const res = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -775,19 +1606,28 @@ async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads' | 'in
       }),
     });
     next = await res.json();
-    if (next.error || !next.access_token) throw new Error(`${next.error}: ${next.error_description || 'Google refresh failed'}`);
+    if (next.error || !next.access_token) {
+      logDetail('Google token refresh failed', `${next.error}: ${next.error_description || ''}`);
+      throw new Error('We could not renew your Google session. Reconnect YouTube to continue.');
+    }
   } else if (storeKey === 'instagram') {
     const res = await fetch(
       `https://graph.instagram.com/access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(conn.accessToken)}`,
     );
     next = await res.json();
-    if (next.error_message || next.error) throw new Error(next.error_message || next.error?.message || 'Instagram token refresh failed — reconnect.');
+    if (next.error_message || next.error) {
+      logDetail('Instagram token refresh failed', next.error_message || next.error?.message);
+      throw new Error('We could not renew your Instagram session. Reconnect Instagram to continue.');
+    }
   } else {
     const res = await fetch(
       `https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=${encodeURIComponent(conn.accessToken)}`,
     );
     next = await res.json();
-    if (next.error) throw new Error(`${next.error.message} — reconnect Threads.`);
+    if (next.error) {
+      logDetail('Threads token refresh failed', next.error.message);
+      throw new Error('We could not renew your Threads session. Reconnect Threads to continue.');
+    }
   }
 
   conn.accessToken = next.access_token;
@@ -795,6 +1635,9 @@ async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads' | 'in
   conn.expiresAt = Date.now() + (next.expires_in ? next.expires_in * 1000 : 3600 * 1000);
   const s2 = loadStore();
   s2[storeKey] = conn;
+  if (storeKey === 'instagram') {
+    s2.instagramAccounts = { ...(s2.instagramAccounts || {}), [conn.accountIds[0]]: conn };
+  }
   saveStore(s2);
   return conn.accessToken;
 }
@@ -828,7 +1671,10 @@ app.post('/api/verify/:platform', async (req, res) => {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const me: any = await meRes.json();
-      if (me.error) return res.status(502).json({ error: `Instagram API: ${me.error.message}` });
+      if (me.error) {
+        logDetail('Instagram verification failed', me.error.message);
+        return res.status(502).json({ error: 'Instagram could not confirm this connection. Reconnect Instagram and try again.' });
+      }
       return res.json({
         platform,
         ok: true,
@@ -840,7 +1686,7 @@ app.post('/api/verify/:platform', async (req, res) => {
 
     if (platform === 'facebook' || platform === 'instagram') {
       const conn = store.meta;
-      if (!conn) return res.status(400).json({ error: 'Meta is not connected. Use Connect Platform first.' });
+      if (!conn) return res.status(400).json({ error: 'Facebook and Instagram are not connected yet. Connect them first, then try again.' });
       const me = await graphGet(`https://graph.facebook.com/${GRAPH_VERSION}/me?fields=id,name`, conn.accessToken);
       const pages = conn.metaPages || [];
       const result = {
@@ -859,7 +1705,7 @@ app.post('/api/verify/:platform', async (req, res) => {
 
     if (platform === 'tiktok') {
       const conn = store.tiktok;
-      if (!conn) return res.status(400).json({ error: 'TikTok is not connected. Use Connect Platform first.' });
+      if (!conn) return res.status(400).json({ error: 'TikTok is not connected yet. Connect it first, then try again.' });
       const accessToken = await freshAccessToken('tiktok');
       const infoRes = await fetch(
         'https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url',
@@ -867,7 +1713,10 @@ app.post('/api/verify/:platform', async (req, res) => {
       );
       const info: any = await infoRes.json();
       const user = info.data?.user;
-      if (!user) return res.status(502).json({ error: info.error?.message || 'TikTok API rejected the token.' });
+      if (!user) {
+        logDetail('TikTok verification failed', info.error?.message);
+        return res.status(502).json({ error: 'TikTok could not confirm this connection. Reconnect TikTok and try again.' });
+      }
       return res.json({
         platform,
         ok: true,
@@ -878,16 +1727,19 @@ app.post('/api/verify/:platform', async (req, res) => {
 
     if (platform === 'youtube') {
       const conn = store.youtube;
-      if (!conn) return res.status(400).json({ error: 'YouTube is not connected. Use Connect Platform first.' });
+      if (!conn) return res.status(400).json({ error: 'YouTube is not connected yet. Connect it first, then try again.' });
       const accessToken = await freshAccessToken('youtube');
       const channelsRes = await fetch(
         'https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&mine=true',
         { headers: { Authorization: `Bearer ${accessToken}` } },
       );
       const channels: any = await channelsRes.json();
-      if (channels.error) return res.status(502).json({ error: `YouTube Data API: ${channels.error.message}` });
+      if (channels.error) {
+        logDetail('YouTube verification failed', channels.error.message);
+        return res.status(502).json({ error: 'YouTube could not confirm this connection. Reconnect YouTube and try again.' });
+      }
       const items = channels.items || [];
-      if (!items.length) return res.status(404).json({ error: 'The connected Google account owns no YouTube channel.' });
+      if (!items.length) return res.status(404).json({ error: 'This Google account has no YouTube channel yet. Create one, then reconnect.' });
       return res.json({
         platform,
         ok: true,
@@ -899,14 +1751,17 @@ app.post('/api/verify/:platform', async (req, res) => {
 
     if (platform === 'threads') {
       const conn = store.threads;
-      if (!conn) return res.status(400).json({ error: 'Threads is not connected. Use Connect Platform first.' });
+      if (!conn) return res.status(400).json({ error: 'Threads is not connected yet. Connect it first, then try again.' });
       const accessToken = await freshAccessToken('threads');
       const infoRes = await fetch(
         'https://graph.threads.net/v1.0/me?fields=id,username',
         { headers: { Authorization: `Bearer ${accessToken}` } },
       );
       const info: any = await infoRes.json();
-      if (info.error) return res.status(502).json({ error: `Threads API: ${info.error.message}` });
+      if (info.error) {
+        logDetail('Threads verification failed', info.error.message);
+        return res.status(502).json({ error: 'Threads could not confirm this connection. Reconnect Threads and try again.' });
+      }
       return res.json({
         platform,
         ok: true,
@@ -915,28 +1770,64 @@ app.post('/api/verify/:platform', async (req, res) => {
       });
     }
 
-    res.status(404).json({ error: `Unknown platform: ${platform}` });
+    res.status(404).json({ error: 'That platform is not supported.' });
   } catch (err: any) {
-    res.status(502).json({ error: err.message });
+    logDetail('connection verification failed', err);
+    res.status(502).json({ error: 'We could not verify this connection right now. Please try again.' });
   }
 });
 
 app.post('/api/disconnect/:platform', (req, res) => {
   const platform = req.params.platform as 'meta' | 'tiktok' | 'youtube' | 'threads' | 'instagram';
   if (!['meta', 'tiktok', 'youtube', 'threads', 'instagram'].includes(platform)) {
-    return res.status(400).json({ error: 'Unknown connection.' });
+    return res.status(400).json({ error: 'That connection type is not supported.' });
   }
   const store = loadStore();
+
+  if (platform === 'instagram' && store.instagramAccounts) {
+    const accountId = (req.query.accountId as string) || store.activeInstagramId;
+    if (accountId) delete store.instagramAccounts[accountId];
+    const remaining = Object.keys(store.instagramAccounts);
+    if (accountId === store.activeInstagramId) {
+      store.activeInstagramId = remaining[0];
+      if (remaining[0]) store.instagram = store.instagramAccounts[remaining[0]];
+      else delete store.instagram;
+    }
+    if (remaining.length === 0) delete store.instagramAccounts;
+    saveStore(store);
+    return res.json({ disconnected: 'instagram', accountId, remaining: remaining.length });
+  }
+
   delete store[platform];
   saveStore(store);
   res.json({ disconnected: platform });
+});
+
+app.post('/api/instagram/active', (req, res) => {
+  const { accountId } = req.body as { accountId?: string };
+  const store = loadStore();
+  const accounts = store.instagramAccounts || {};
+  if (!accountId || !accounts[accountId]) {
+    return res.status(404).json({ error: 'That Instagram account is no longer connected.' });
+  }
+  store.activeInstagramId = accountId;
+  store.instagram = accounts[accountId];
+  saveStore(store);
+  res.json({ active: accountId, accountNames: accounts[accountId].accountNames });
 });
 
 app.listen(PORT, () => {
   console.log(`[relate-oauth] listening on http://localhost:${PORT}`);
   console.log(`[relate-oauth] redirect base: ${APP_BASE}`);
   console.log(`[relate-oauth] media data dir: ${MEDIA_DIR}`);
-  if (!META_APP_ID || !META_APP_SECRET) console.warn('[relate-oauth] META_APP_ID / META_APP_SECRET not set — Meta flows disabled');
-  if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) console.warn('[relate-oauth] TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET not set — TikTok flows disabled');
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) console.warn('[relate-oauth] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — YouTube flows disabled');
+  void detectFfmpeg().then((tools) => {
+    console.log(
+      tools
+        ? `[relate-oauth] video conversion: ${tools.source} ffmpeg`
+        : '[relate-oauth] video conversion disabled (no ffmpeg): unsupported clips may not preview',
+    );
+  });
+  if (!META_APP_ID || !META_APP_SECRET) console.warn('[relate-oauth] Meta sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
+  if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) console.warn('[relate-oauth] TikTok sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) console.warn('[relate-oauth] YouTube sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
 });

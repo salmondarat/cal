@@ -3,7 +3,7 @@
 > **This deployment** serves the app at `https://relate.internalc.my.id` through a
 > named Cloudflare Tunnel (`relate-social` → `localhost:3000`). All callbacks below
 > use `APP_URL`, so the dashboards must register the `https://relate.internalc.my.id/...`
-> variants, not localhost. Keep `npm run dev:server`, `npm run dev`, and
+> variants, not localhost. Keep `pnpm dev:server`, `pnpm dev`, and
 > `cloudflared tunnel run relate-social` running while testing.
 
 `server.ts` is a small local OAuth backend that owns all secrets and access tokens.
@@ -64,6 +64,20 @@ the IG account itself, no personal Facebook account needed — token on
 (IG discovered through the Meta connection in App A). Both can coexist;
 standalone wins in the tab status.
 
+**Multiple Instagram accounts:** the app stores every Instagram Login account in
+`.secrets/connections.json` (`instagramAccounts`, keyed by IG user id). To add one:
+
+1. Register the account as an **Instagram tester** in App B and accept the invite
+   from that Instagram account.
+2. In the app, Instagram tab → **Add another account** (the authorize URL sends
+   `force_reauth=true`, so the login screen always appears).
+3. Accounts from a different account center may require a separate browser
+   profile/incognito window; accounts in the same account center can be switched
+   on the login screen.
+4. Settings lists every account — **Use** sets the default (active) account, the
+   composer's *Instagram account* dropdown sets it per post
+   (`ScheduledPost.platformAccounts.instagram`).
+
 For both apps: **App roles → Roles** — the creator is automatically Administrator,
 which is enough; the "Create test users" (simulated accounts) page can be ignored,
 especially while Meta shows "ability to create test users is disabled temporarily".
@@ -105,8 +119,8 @@ especially while Meta shows "ability to create test users is disabled temporaril
 ## 4. Connect every platform (in-app)
 
 ```bash
-npm run dev:server   # terminal 1 — OAuth backend :8787 (reload-safe state file)
-npm run dev          # terminal 2 — Vite :3000, proxies /auth + /api
+pnpm dev:server   # terminal 1 — OAuth backend :8787 (reload-safe state file)
+pnpm dev          # terminal 2 — Vite :3000, proxies /auth + /api
 ```
 
 Open the app → header **API Keys**, then per tab:

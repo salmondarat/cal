@@ -8,6 +8,10 @@ simulators before scheduling.
 > Publishing to the platforms is **not implemented yet** — this build covers
 > connecting accounts and verifying them against the real APIs.
 
+> **Working on this repo (human or AI)?** Start with the
+> [repository knowledge base](docs/knowledge-base/README.md) — architecture,
+> backend/OAuth internals, frontend flows, data contracts, known gaps and recipes.
+
 ---
 
 ## Features
@@ -18,9 +22,18 @@ simulators before scheduling.
 - **Device simulators** — see how a post renders on Instagram, Facebook, Threads, TikTok and YouTube.
 - **Universal media library** — files stored on disk outside the project, organized by
   `YYYY-MM-DD` folders and shared across every browser/port/build.
+- **Local folder scanner** — add any folder path or use the native OS folder picker
+  (Windows, macOS, Linux) and browse subfolders and media in place (files are never
+  copied or moved). The grid has type filters and sort controls.
+- **Media preview** — click any asset for a full-size lightbox with metadata, video
+  playback and arrow-key navigation; videos get generated poster thumbnails in the grid.
+- **Cached thumbnails** — images are resized once with `sharp` and cached as WebP on
+  disk, so large folders never load full-resolution files into the grid.
 - **Live platform connections** — OAuth login, server-side token exchange, automatic
   refresh (TikTok / YouTube / Threads / Instagram Login) and a real "Test API
   Connection" handshake.
+- **Multiple Instagram accounts** — connect several Instagram Login accounts, switch
+  the active one in Settings, and pick a specific account per post in the composer.
 
 ## Architecture
 
@@ -46,14 +59,17 @@ OAuth backend (Express, server.ts, :8787)
 
 ## Getting started
 
-**Requirements:** Node.js 20+ (developed on Node 24), npm or pnpm.
+**Requirements:** Node.js 20+ (developed on Node 24) and pnpm 12 (pinned via `packageManager`).
+Video conversion ships with the app: `@ffmpeg-installer/ffmpeg` + `@ffprobe-installer/ffprobe`
+bundle the binaries per platform, so no system ffmpeg install is needed (a system `ffmpeg` is
+used as fallback only).
 
 ```bash
-npm install
+pnpm install
 cp .env.example .env        # Windows: copy .env.example .env
 # fill in the platform credentials (see docs/platform-setup.md)
-npm run dev:server          # terminal 1 — OAuth backend on :8787
-npm run dev                 # terminal 2 — Vite on :3000
+pnpm dev:server             # terminal 1 — OAuth backend on :8787
+pnpm dev                    # terminal 2 — Vite on :3000
 ```
 
 Open the app → header **API Keys** → connect a platform → **Test API Connection**.
@@ -79,12 +95,12 @@ Full registration walkthrough — including redirect URIs and tester roles — i
 
 | Script | Description |
 | --- | --- |
-| `npm run dev` | Vite dev server on `:3000` (proxies `/auth` and `/api` to the backend) |
-| `npm run dev:server` | OAuth backend with auto-reload (`tsx watch server.ts`) |
-| `npm run build` | Production build of the frontend |
-| `npm run preview` | Preview the production build |
-| `npm run lint` | TypeScript type check (`tsc --noEmit`) |
-| `npm run clean` | Remove `dist/` |
+| `pnpm dev` | Vite dev server on `:3000` (proxies `/auth` and `/api` to the backend) |
+| `pnpm dev:server` | OAuth backend with auto-reload (`tsx watch server.ts`) |
+| `pnpm build` | Production build of the frontend |
+| `pnpm preview` | Preview the production build |
+| `pnpm lint` | TypeScript type check (`tsc --noEmit`) |
+| `pnpm clean` | Remove `dist/` |
 
 ## Data locations
 
@@ -93,13 +109,30 @@ Full registration walkthrough — including redirect URIs and tester roles — i
 | OAuth tokens | `.secrets/connections.json` (git-ignored, file mode 600) |
 | In-flight OAuth state | `.secrets/oauth-states.json` |
 | Media files | `%LOCALAPPDATA%\RelateSocial\media\YYYY-MM-DD\` (override with `RELATE_DATA_DIR`) |
+| Scanned folder list | `%LOCALAPPDATA%\RelateSocial\library-roots.json` |
+| Thumbnail cache | `%LOCALAPPDATA%\RelateSocial\thumbnails\` (safe to delete; regenerated on demand) |
+| Browser-playable video cache | `%LOCALAPPDATA%\RelateSocial\streams\` (created by ffmpeg when a clip needs remuxing; safe to delete) |
 | Scheduled posts | browser `localStorage` (`relate_social_scheduled_posts_v2`) |
 | Media fallback (without backend) | IndexedDB `RelateSocialMediaDB` |
 
 Media endpoints: `GET /api/storage/info`, `GET /api/storage/media/dates`,
-`GET /api/storage/media?date=YYYY-MM-DD`, `GET|POST|DELETE /api/storage/media`.
+`GET /api/storage/media?date=YYYY-MM-DD`, `GET|POST|DELETE /api/storage/media`,
+`GET /api/storage/thumbnail?date=YYYY-MM-DD&name=<file>&w=480`.
 Only folders named `YYYY-MM-DD` are scanned; uploads are limited to
 jpg/jpeg/png/webp/gif/mp4/webm/mov up to 1 GB.
+
+Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/roots/:id`,
+`GET /api/library/list?root=<id>&path=<relative>`, `GET /api/library/file?root=<id>&path=<relative>`
+(range requests supported for video), `GET /api/library/thumbnail?root=<id>&path=<relative>&w=480`,
+`GET /api/library/video-thumbnail?root=<id>&path=<relative>&w=480&t=<seconds>`,
+`GET /api/library/stream?root=<id>&path=<relative>` (browser-playable copy, cached),
+`POST /api/library/pick-folder` (opens the native folder dialog on the machine running the
+backend). The same `thumbnail` / `video-thumbnail` / `stream` trio exists under `/api/storage/*`.
+
+Clips that Chrome cannot decode are converted once and cached in
+`%LOCALAPPDATA%\RelateSocial\streams\`: HE-AAC / xHE-AAC audio is remuxed to AAC-LC (this is
+what makes the player's volume control usable), and HEVC/other video is re-encoded to H.264.
+The backend logs which ffmpeg it picked at startup.
 
 ## Exposing the app over HTTPS
 
@@ -136,3 +169,7 @@ dashboard. Keep the backend, Vite and the tunnel running while testing.
 | TikTok `non_sandbox_target` | Add the account under Sandbox → Target users, use sandbox client keys |
 | `Invalid or expired OAuth state` | Restart the flow after backend reload |
 | Media not visible | Backend must be running; otherwise the app falls back to IndexedDB |
+| Thumbnails missing / full-size images in the grid | Run `pnpm install` (installs `sharp`) and restart the backend; check the thumbnail cache folder is writable |
+| Native folder picker does not open on Linux | Install `zenity` or `kdialog`; paste the folder path as a fallback |
+| Volume control greyed out in the preview | The clip uses HE-AAC/xHE-AAC audio, which Chrome cannot decode. The backend converts it on first play — check `pnpm dev:server` logs `video conversion: bundled ffmpeg`; if it says disabled, run `pnpm install` and restart |
+| "This video could not be played" for an HEVC clip | The browser cannot decode HEVC; open the clip again so `/api/library/stream` can produce the cached H.264 copy (large files take longer) |

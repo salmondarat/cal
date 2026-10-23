@@ -13,6 +13,7 @@ import {
 import { PlatformId, PlatformApiCredentials } from '../../types';
 import { ALL_PLATFORM_IDS, PLATFORMS } from '../../constants/platforms';
 import { PlatformIcon } from '../PlatformIcon';
+import { toUserMessage } from '../../utils/errorMessages';
 
 interface ApiSettingsModalProps {
   isOpen: boolean;
@@ -41,6 +42,14 @@ interface ServerConnection {
   scopes: string[];
   connectedAt: string;
 }
+
+interface InstagramAccountInfo {
+  id: string;
+  accountName: string;
+  active: boolean;
+}
+
+type ServerState = Record<string, ServerConnection> & { instagramAccounts?: InstagramAccountInfo[] };
 
 export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   isOpen,
@@ -96,16 +105,16 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     });
   };
 
-  const [serverConns, setServerConns] = useState<Record<string, ServerConnection>>({});
+  const [serverConns, setServerConns] = useState<ServerState>({});
 
   const refreshConnections = async () => {
     try {
       const conns = await fetch('/api/connections').then((r) => r.json());
       setServerConns(conns);
       applyServerConnections(conns);
-      return conns as Record<string, ServerConnection>;
+      return conns as ServerState;
     } catch {
-      setServerError('OAuth backend is not running. Start it with `npm run dev:server`.');
+      setServerError('The sign-in service is not running. Start the local server, then try again.');
       return null;
     }
   };
@@ -136,7 +145,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
           message: d.message || `${d.platform} connected.`,
         });
       } else {
-        setTestResult({ success: false, message: `${d.platform}: ${d.message || 'consent failed'}` });
+        setTestResult({ success: false, message: d.message || 'The sign-in did not complete. Please try again.' });
       }
       return conns;
     };
@@ -186,12 +195,12 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     const oauthPath = OAUTH_START_PATH[platformId];
     const probeRes = await fetch(oauthPath, { redirect: 'manual' }).catch(() => null);
     if (!probeRes) {
-      setServerError('OAuth backend is not running. Start it with `npm run dev:server`.');
+      setServerError('The sign-in service is not running. Start the local server, then try again.');
       return;
     }
     if (probeRes.status === 400) {
       const data = await probeRes.json().catch(() => ({}));
-      setTestResult({ success: false, message: data.error || 'OAuth provider is not configured on the backend.' });
+      setTestResult({ success: false, message: data.error || 'This platform is not ready to connect yet. Please try again later.' });
       return;
     }
     setConnecting(platformId);
@@ -218,7 +227,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       try {
         conns = await fetch('/api/connections').then((r) => r.json());
       } catch {
-        return finish(false, 'Lost contact with the OAuth backend — is `npm run dev:server` still running?');
+        return finish(false, 'We lost contact with the sign-in service. Make sure the local server is running, then try again.');
       }
       if (conns[group]) {
         applyServerConnections(conns);
@@ -227,11 +236,11 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       if (tab.closed) {
         return finish(
           false,
-          'Login tab was closed before the connection finished — nothing was stored. Click Connect to try again.',
+          'The sign-in window was closed before it finished. Select Connect to try again.',
         );
       }
       if (Date.now() - started > 90000) {
-        return finish(false, 'No completed connection after 90s. Check the login tab for an error (consent denied, wrong redirect URI, or account not a tester).');
+        return finish(false, 'The sign-in did not finish in time. Please try again.');
       }
     }, 1500);
     pollTimerRef.current = poll;
@@ -243,7 +252,9 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     try {
       const res = await fetch(`/api/verify/${platformId}`, { method: 'POST' });
       const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      if (!res.ok || data.error) {
+        throw new Error(toUserMessage(data.error, 'The connection check did not complete. Please try again.'));
+      }
       setCredentials((prev) => ({
         ...prev,
         [platformId]: {
@@ -255,12 +266,15 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       setTestResult({
         success: data.ok,
         message: data.ok
-          ? `Live ${PLATFORMS[platformId].name} API handshake OK — identity: ${data.identity}` +
+          ? `${PLATFORMS[platformId].name} connection verified as ${data.identity}` +
             (data.instagram?.length ? ` · Instagram: ${data.instagram.map((i: any) => `@${i.username}`).join(', ')}` : '')
-          : data.warning || 'Verified, but no usable account was returned.',
+          : data.warning || 'The connection works, but no usable account was found.',
       });
-    } catch (err: any) {
-      setTestResult({ success: false, message: err.message });
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: toUserMessage(err, 'We could not verify this connection right now. Please try again.'),
+      });
     } finally {
       setTestingPlatform(null);
     }
@@ -268,6 +282,30 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
 
   const handleDisconnect = async (platformId: PlatformId) => {
     await fetch(`/api/disconnect/${CONNECTION_GROUP[platformId]}`, { method: 'POST' }).catch(() => {});
+    await refreshConnections();
+    setTestResult(null);
+  };
+
+  const handleActivateInstagram = async (accountId: string) => {
+    const res = await fetch('/api/instagram/active', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId }),
+    }).catch(() => null);
+    const data = await res?.json().catch(() => ({}));
+    await refreshConnections();
+    setTestResult(
+      res?.ok
+        ? { success: true, message: `Active Instagram account: ${data?.accountNames?.[0] || accountId}` }
+        : {
+            success: false,
+            message: toUserMessage(data?.error, 'We could not switch the Instagram account. Please try again.'),
+          },
+    );
+  };
+
+  const handleDisconnectInstagram = async (accountId: string) => {
+    await fetch(`/api/disconnect/instagram?accountId=${encodeURIComponent(accountId)}`, { method: 'POST' }).catch(() => {});
     await refreshConnections();
     setTestResult(null);
   };
@@ -366,52 +404,70 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
               {/* Status Action */}
               <div className="flex items-center gap-2 flex-wrap justify-end">
                 {activeTab === 'instagram' ? (
-                  <>
-                    {serverConns.instagram ? (
-                      <>
-                        <span className="text-[11px] text-emerald-700 font-mono">
-                          @{serverConns.instagram.accountNames[0]?.replace('@', '')} · Instagram Login
+                  <div className="flex flex-col items-end gap-1.5">
+                    {(serverConns.instagramAccounts || []).map((acc) => (
+                      <div key={acc.id} className="flex items-center gap-2 text-[11px]">
+                        <span className={acc.active ? 'font-semibold text-emerald-700' : 'text-neutral-600'}>
+                          {acc.accountName}
+                          {acc.active ? ' · active' : ''}
                         </span>
+                        {!acc.active && (
+                          <button
+                            type="button"
+                            onClick={() => handleActivateInstagram(acc.id)}
+                            className="text-[#0000ee] hover:underline cursor-pointer"
+                          >
+                            Use
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => handleDisconnect('instagram')}
-                          className="px-2.5 py-1 text-xs text-red-600 hover:bg-red-50 border border-red-200 rounded-[6px] transition-colors"
+                          onClick={() => handleDisconnectInstagram(acc.id)}
+                          className="text-red-600 hover:underline cursor-pointer"
                         >
-                          Disconnect
+                          remove
                         </button>
-                      </>
-                    ) : (
+                      </div>
+                    ))}
+                    {(serverConns.instagramAccounts || []).length === 0 && !serverConns.instagram && (
+                      <span className="text-[11px] text-neutral-500">No Instagram Login account connected.</span>
+                    )}
+                    <div className="flex items-center gap-2">
                       <button
                         type="button"
                         disabled={connecting === 'instagram'}
                         onClick={() => handleConnect('instagram')}
                         className="px-2.5 py-1 text-xs text-[#0000ee] hover:bg-blue-50 border border-blue-200 rounded-[6px] transition-colors font-medium disabled:opacity-50"
                       >
-                        {connecting === 'instagram' ? 'Waiting for Instagram approval...' : 'Connect via Instagram Login'}
+                        {connecting === 'instagram'
+                          ? 'Waiting for Instagram approval...'
+                          : (serverConns.instagramAccounts || []).length > 0
+                            ? 'Add another account'
+                            : 'Connect via Instagram Login'}
                       </button>
-                    )}
-                    {instagramViaMeta ? (
-                      <span className="text-[11px] text-neutral-500">
-                        also connected via Facebook Page ·{' '}
+                      {instagramViaMeta ? (
+                        <span className="text-[11px] text-neutral-500">
+                          also connected via Facebook Page ·{' '}
+                          <button
+                            type="button"
+                            onClick={() => handleDisconnect('facebook')}
+                            className="text-red-600 hover:underline cursor-pointer"
+                          >
+                            disconnect
+                          </button>
+                        </span>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => handleDisconnect('facebook')}
-                          className="text-red-600 hover:underline cursor-pointer"
+                          disabled={connecting === 'facebook'}
+                          onClick={() => handleConnect('facebook')}
+                          className="px-2.5 py-1 text-xs text-neutral-700 hover:bg-neutral-100 border border-neutral-300 rounded-[6px] transition-colors font-medium disabled:opacity-50"
                         >
-                          disconnect
+                          {connecting === 'facebook' ? 'Waiting for Meta approval...' : 'Connect via Facebook Page'}
                         </button>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={connecting === 'facebook'}
-                        onClick={() => handleConnect('facebook')}
-                        className="px-2.5 py-1 text-xs text-neutral-700 hover:bg-neutral-100 border border-neutral-300 rounded-[6px] transition-colors font-medium disabled:opacity-50"
-                      >
-                        {connecting === 'facebook' ? 'Waiting for Meta approval...' : 'Connect via Facebook Page'}
-                      </button>
-                    )}
-                  </>
+                      )}
+                    </div>
+                  </div>
                 ) : currentCred.isConnected ? (
                   <button
                     type="button"

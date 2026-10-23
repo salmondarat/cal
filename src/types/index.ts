@@ -16,8 +16,43 @@ export interface MediaItem {
   fileRef?: File;
   uploadedAt?: string;
   thumbnailUrl?: string;
+  playbackUrl?: string; // browser-compatible stream (audio remuxed when the codec is unsupported)
   serverManaged?: boolean; // stored in the universal date-folder media dir via backend
   folderDate?: string; // YYYY-MM-DD folder the file lives in
+  libraryPath?: string; // path relative to a scanned local library root
+  libraryRoot?: string; // display name of the scanned library root
+}
+
+export interface LibraryRoot {
+  id: string;
+  name: string;
+  path: string;
+  addedAt: string;
+  exists: boolean;
+}
+
+export interface LibraryFolder {
+  name: string;
+  path: string;
+}
+
+export interface LibraryFile {
+  name: string;
+  path: string;
+  url: string;
+  playUrl?: string;
+  thumbUrl?: string;
+  size: number;
+  type: string;
+  modifiedAt: string;
+}
+
+export interface LibraryListing {
+  root: { id: string; name: string; path: string };
+  path: string;
+  folders: LibraryFolder[];
+  files: LibraryFile[];
+  truncated: boolean;
 }
 
 export interface PlatformCustomization {
@@ -43,6 +78,7 @@ export interface ScheduledPost {
   baseCaption: string;
   baseHashtags: string[];
   platformOverrides: Partial<Record<PlatformId, PlatformCustomization>>;
+  platformAccounts?: Partial<Record<PlatformId, string>>; // per-post account id (e.g. Instagram Login user id)
   status: PostStatus;
   createdAt: string;
   metrics?: {

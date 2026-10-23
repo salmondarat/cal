@@ -38,6 +38,7 @@ interface UnifiedComposerModalProps {
   initialPost?: ScheduledPost | null;
   initialDate?: string;
   initialTime?: string;
+  initialMedia?: MediaItem[];
   onPreviewPost?: (post: ScheduledPost) => void;
   availableStoredMedia?: MediaItem[];
 }
@@ -60,6 +61,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   initialPost,
   initialDate,
   initialTime,
+  initialMedia,
   onPreviewPost,
   availableStoredMedia = [],
 }) => {
@@ -83,6 +85,8 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
     Partial<Record<PlatformId, PlatformCustomization>>
   >({});
   const [activePlatformTab, setActivePlatformTab] = useState<PlatformId | null>(null);
+  const [igAccounts, setIgAccounts] = useState<{ id: string; accountName: string; active: boolean }[]>([]);
+  const [instagramAccountId, setInstagramAccountId] = useState('');
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -105,20 +109,41 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
       setBaseHashtags([...initialPost.baseHashtags]);
       setPlatformOverrides({ ...initialPost.platformOverrides });
       setActivePlatformTab(initialPost.platforms[0] || null);
+      setInstagramAccountId(initialPost.platformAccounts?.instagram || '');
     } else {
+      const seededMedia = initialMedia ? [...initialMedia] : [];
       setTitle('');
       setScheduledDate(initialDate || new Date().toISOString().split('T')[0]);
       setScheduledTime(initialTime || '10:00');
       setSelectedPlatforms(['instagram', 'tiktok', 'youtube']);
-      setBaseFormat('image');
-      setMediaList([]);
+      setBaseFormat(
+        seededMedia.length > 1 ? 'carousel' : seededMedia[0]?.type.startsWith('video/') ? 'video' : 'image',
+      );
+      setMediaList(seededMedia);
       setBaseCaption('');
       setBaseHashtags(['#B2BSaaS', '#TechInnovation']);
       setPlatformOverrides({});
       setActivePlatformTab('instagram');
+      setInstagramAccountId('');
     }
     setUploadError(null);
-  }, [initialPost, initialDate, initialTime, isOpen]);
+  }, [initialPost, initialDate, initialTime, initialMedia, isOpen]);
+
+  // Load connected Instagram accounts so a post can target a specific one.
+  useEffect(() => {
+    if (!isOpen) return;
+    fetch('/api/connections')
+      .then((r) => r.json())
+      .then((conns) => {
+        const accounts: { id: string; accountName: string; active: boolean }[] = conns.instagramAccounts || [];
+        setIgAccounts(accounts);
+        setInstagramAccountId((prev) => {
+          if (prev && accounts.some((a) => a.id === prev)) return prev;
+          return accounts.find((a) => a.active)?.id || accounts[0]?.id || '';
+        });
+      })
+      .catch(() => setIgAccounts([]));
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -259,6 +284,10 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
       baseCaption,
       baseHashtags,
       platformOverrides,
+      platformAccounts: {
+        ...(initialPost?.platformAccounts || {}),
+        ...(instagramAccountId ? { instagram: instagramAccountId } : {}),
+      },
       status,
       createdAt: initialPost?.createdAt || new Date().toISOString(),
       metrics: initialPost?.metrics || {
@@ -362,6 +391,27 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 );
               })}
             </div>
+
+            {selectedPlatforms.includes('instagram') && igAccounts.length > 1 && (
+              <div className="flex items-center gap-2 pt-1">
+                <label className="text-[11px] font-medium text-neutral-500" htmlFor="ig-account-select">
+                  Instagram account
+                </label>
+                <select
+                  id="ig-account-select"
+                  value={instagramAccountId}
+                  onChange={(e) => setInstagramAccountId(e.target.value)}
+                  className="px-2 py-1 text-[11px] bg-white border border-neutral-200 rounded-[6px] text-neutral-800"
+                >
+                  {igAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.accountName}
+                      {account.active ? ' (default)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           {/* Section 2: Media Ingestion Zone (Support up to 1 GB) */}
