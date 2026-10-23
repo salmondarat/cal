@@ -125,14 +125,18 @@ Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/root
 `GET /api/library/list?root=<id>&path=<relative>`, `GET /api/library/file?root=<id>&path=<relative>`
 (range requests supported for video), `GET /api/library/thumbnail?root=<id>&path=<relative>&w=480`,
 `GET /api/library/video-thumbnail?root=<id>&path=<relative>&w=480&t=<seconds>`,
-`GET /api/library/stream?root=<id>&path=<relative>` (browser-playable copy, cached),
+`GET /api/library/stream?root=<id>&path=<relative>` (browser-playable copy; `202` while converting),
+`GET /api/library/stream/status?root=<id>&path=<relative>` (`original` | `converting` + `percent` | `ready` | `failed`),
 `POST /api/library/pick-folder` (opens the native folder dialog on the machine running the
-backend). The same `thumbnail` / `video-thumbnail` / `stream` trio exists under `/api/storage/*`.
+backend). The same `thumbnail` / `video-thumbnail` / `stream` / `stream/status` set exists under `/api/storage/*`.
 
 Clips that Chrome cannot decode are converted once and cached in
 `%LOCALAPPDATA%\RelateSocial\streams\`: HE-AAC / xHE-AAC audio is remuxed to AAC-LC (this is
 what makes the player's volume control usable), and HEVC/other video is re-encoded to H.264.
-The backend logs which ffmpeg it picked at startup.
+Conversion runs in the background — `GET .../stream` answers `202 converting` right away and
+`GET .../stream/status` reports progress, so the preview shows "Converting for playback · %"
+instead of timing out through the dev proxy or the tunnel. The backend logs which ffmpeg it
+picked at startup.
 
 ## Exposing the app over HTTPS
 

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import express from 'express';
@@ -843,8 +843,17 @@ interface FfmpegTools {
 }
 
 let ffmpegTools: FfmpegTools | null | undefined;
-const probeCache = new Map<string, { video?: MediaStreamInfo; audio?: MediaStreamInfo } | null>();
-const transcodeJobs = new Map<string, Promise<string>>();
+const probeCache = new Map<string, MediaProbeResult | null>();
+
+interface TranscodeJob {
+  outFile: string;
+  percent: number;
+  done: boolean;
+  error?: string;
+  errorAt?: number;
+}
+
+const transcodeJobs = new Map<string, TranscodeJob>();
 
 function bundledFfmpeg(): FfmpegTools | null {
   try {
@@ -883,7 +892,13 @@ async function detectFfmpeg(): Promise<FfmpegTools | null> {
   return null;
 }
 
-async function probeMediaStreams(abs: string, st: fs.Stats) {
+interface MediaProbeResult {
+  video?: MediaStreamInfo;
+  audio?: MediaStreamInfo;
+  duration: number;
+}
+
+async function probeMediaStreams(abs: string, st: fs.Stats): Promise<MediaProbeResult | null> {
   const key = `${abs}|${st.mtimeMs}|${st.size}`;
   if (probeCache.has(key)) return probeCache.get(key) ?? null;
   const tools = await detectFfmpeg();
@@ -891,13 +906,15 @@ async function probeMediaStreams(abs: string, st: fs.Stats) {
   try {
     const { stdout } = await execFileAsync(
       tools.ffprobe,
-      ['-v', 'error', '-print_format', 'json', '-show_streams', abs],
+      ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', abs],
       { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
     );
-    const streams: any[] = JSON.parse(stdout).streams || [];
-    const result = {
+    const parsed = JSON.parse(stdout);
+    const streams: any[] = parsed.streams || [];
+    const result: MediaProbeResult = {
       video: streams.find((s) => s.codec_type === 'video'),
       audio: streams.find((s) => s.codec_type === 'audio'),
+      duration: Number(parsed.format?.duration) || 0,
     };
     probeCache.set(key, result);
     return result;
@@ -919,84 +936,178 @@ function videoNeedsRemux(video?: MediaStreamInfo): boolean {
   return Boolean(video?.codec_name) && !PLAYABLE_VIDEO_CODECS.has(video!.codec_name!);
 }
 
-async function ensurePlayableCopy(abs: string, st: fs.Stats, fixAudio: boolean, fixVideo: boolean): Promise<string> {
-  const key = crypto
-    .createHash('sha1')
-    .update(`v2|${abs}|${st.mtimeMs}|${st.size}|${fixAudio ? 'a' : ''}${fixVideo ? 'v' : ''}`)
-    .digest('hex');
-  const outFile = path.join(STREAM_DIR, `${key}.mp4`);
-  if (fs.existsSync(outFile)) return outFile;
+function startTranscode(
+  tools: FfmpegTools,
+  abs: string,
+  st: fs.Stats,
+  job: TranscodeJob,
+  fixAudio: boolean,
+  fixVideo: boolean,
+  duration: number,
+) {
+  fs.mkdirSync(STREAM_DIR, { recursive: true });
+  const tmpFile = `${job.outFile}.${process.pid}.tmp.mp4`;
+  const big = st.size > 200 * 1024 * 1024;
+  const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', abs, '-map', '0:v:0', '-map', '0:a:0?', '-sn'];
+  if (fixVideo) {
+    // Cap the long edge so 4K clips do not take minutes to re-encode.
+    const cap = big ? 1280 : 1920;
+    const scale = `scale=w='if(gt(iw\\,ih)\\,min(${cap}\\,iw)\\,-2)':h='if(gt(iw\\,ih)\\,-2\\,min(${cap}\\,ih))'`;
+    args.push('-c:v', 'libx264', '-preset', big ? 'ultrafast' : 'veryfast', '-crf', big ? '30' : '24', '-vf', scale, '-pix_fmt', 'yuv420p');
+  } else {
+    args.push('-c:v', 'copy');
+  }
+  if (fixAudio) args.push('-c:a', 'aac', '-profile:a', 'aac_low', '-ac', '2');
+  else args.push('-c:a', 'copy');
+  args.push('-max_muxing_queue_size', '4096', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', tmpFile);
 
-  const running = transcodeJobs.get(key);
-  if (running) return running;
+  const child = spawn(tools.ffmpeg, args, { windowsHide: true });
+  let stderr = '';
 
-  const tools = await detectFfmpeg();
-  if (!tools) throw new Error('ffmpeg is not available on this machine.');
+  const killTimer = setTimeout(() => {
+    job.error = 'Conversion timed out.';
+    job.errorAt = Date.now();
+    child.kill('SIGKILL');
+  }, TRANSCODE_TIMEOUT);
 
-  const job = (async () => {
-    await fs.promises.mkdir(STREAM_DIR, { recursive: true });
-    const tmpFile = `${outFile}.${process.pid}.tmp.mp4`;
-    const args = ['-nostdin', '-loglevel', 'error', '-y', '-i', abs, '-map', '0:v:0', '-map', '0:a:0?', '-sn'];
-    if (fixVideo) {
-      // Cap the long edge so 4K clips do not take minutes to re-encode.
-      const cap = st.size > 200 * 1024 * 1024 ? 1280 : 1920;
-      const scale = `scale=w='if(gt(iw\\,ih)\\,min(${cap}\\,iw)\\,-2)':h='if(gt(iw\\,ih)\\,-2\\,min(${cap}\\,ih))'`;
-      args.push(
-        '-c:v',
-        'libx264',
-        '-preset',
-        st.size > 200 * 1024 * 1024 ? 'ultrafast' : 'veryfast',
-        '-crf',
-        st.size > 200 * 1024 * 1024 ? '30' : '24',
-        '-vf',
-        scale,
-        '-pix_fmt',
-        'yuv420p',
-      );
-    } else {
-      args.push('-c:v', 'copy');
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => {
+    if (!duration) return;
+    for (const line of chunk.split('\n')) {
+      const match = /^out_time_(us|ms|millis)=(\d+)$/.exec(line.trim());
+      if (!match) continue;
+      const divisor = match[1] === 'us' ? 1e6 : 1e3;
+      const seconds = Number(match[2]) / divisor;
+      // The final +faststart pass rewrites the file, so hold back the last few percent.
+      job.percent = Math.max(job.percent, Math.min(95, (seconds / duration) * 100));
     }
-    if (fixAudio) args.push('-c:a', 'aac', '-profile:a', 'aac_low', '-ac', '2');
-    else args.push('-c:a', 'copy');
-    args.push('-max_muxing_queue_size', '4096', '-movflags', '+faststart', tmpFile);
-    await execFileAsync(tools.ffmpeg, args, {
-      timeout: TRANSCODE_TIMEOUT,
-      maxBuffer: 8 * 1024 * 1024,
-      windowsHide: true,
-    });
-    await fs.promises.rename(tmpFile, outFile);
-    return outFile;
-  })().finally(() => transcodeJobs.delete(key));
-
-  transcodeJobs.set(key, job);
-  return job;
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => {
+    stderr = (stderr + chunk).slice(-800);
+  });
+  child.on('error', (err) => {
+    clearTimeout(killTimer);
+    job.error = err.message;
+    job.errorAt = Date.now();
+    job.done = true;
+  });
+  child.on('close', (code) => {
+    clearTimeout(killTimer);
+    if (code === 0) {
+      fs.promises
+        .rename(tmpFile, job.outFile)
+        .then(() => {
+          job.done = true;
+          job.percent = 100;
+        })
+        .catch((err) => {
+          job.error = err.message;
+          job.errorAt = Date.now();
+          job.done = true;
+        });
+      return;
+    }
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {}
+    job.error = stderr.trim().split('\n').slice(-1)[0] || `ffmpeg exited with code ${code}`;
+    job.errorAt = Date.now();
+    job.done = true;
+    logDetail('playable copy failed', job.error);
+  });
 }
 
-async function servePlayable(req: express.Request, res: express.Response, abs: string, mime: string) {
+type PlayableState =
+  | { state: 'ready'; percent: number; file: string }
+  | { state: 'converting'; percent: number }
+  | { state: 'failed'; percent: number; error: string };
+
+// Conversion runs in the background: the HTTP request never waits for ffmpeg,
+// which would time out through the dev proxy and the tunnel.
+function getPlayableState(
+  tools: FfmpegTools,
+  abs: string,
+  st: fs.Stats,
+  fixAudio: boolean,
+  fixVideo: boolean,
+  duration: number,
+): PlayableState {
+  const key = crypto
+    .createHash('sha1')
+    .update(`v3|${abs}|${st.mtimeMs}|${st.size}|${fixAudio ? 'a' : ''}${fixVideo ? 'v' : ''}`)
+    .digest('hex');
+  const outFile = path.join(STREAM_DIR, `${key}.mp4`);
+  if (fs.existsSync(outFile)) return { state: 'ready', percent: 100, file: outFile };
+
+  let job = transcodeJobs.get(outFile);
+  if (job?.error && job.errorAt && Date.now() - job.errorAt > 30000) {
+    transcodeJobs.delete(outFile);
+    job = undefined;
+  }
+  if (!job) {
+    job = { outFile, percent: 0, done: false };
+    transcodeJobs.set(outFile, job);
+    startTranscode(tools, abs, st, job, fixAudio, fixVideo, duration);
+  }
+
+  if (job.error) return { state: 'failed', percent: Math.round(job.percent), error: job.error };
+  if (job.done && fs.existsSync(outFile)) return { state: 'ready', percent: 100, file: outFile };
+  return { state: 'converting', percent: Math.round(job.percent) };
+}
+
+interface PlayableResolution {
+  st: fs.Stats;
+  needsConversion: boolean;
+  playable: PlayableState | null;
+}
+
+// Returns null when the response (404) has already been sent.
+async function resolvePlayable(req: express.Request, res: express.Response, abs: string): Promise<PlayableResolution | null> {
   let st: fs.Stats;
   try {
     st = fs.statSync(abs);
   } catch {
-    return res.status(404).json({ error: 'That file could not be found.' });
+    res.status(404).json({ error: 'That file could not be found.' });
+    return null;
   }
 
-  const info = await probeMediaStreams(abs, st);
-  if (!info) return streamFileWithRange(req, res, abs, mime, st);
+  const [info, tools] = await Promise.all([probeMediaStreams(abs, st), detectFfmpeg()]);
+  if (!info || !tools) return { st, needsConversion: false, playable: null };
 
   // ?force=1 normalises audio even when the probe looked fine (browser refused to decode it).
   const force = req.query.force === '1' || req.query.force === 'true';
   const fixAudio = force || audioNeedsRemux(info.audio);
-  let fixVideo = videoNeedsRemux(info.video);
-  if (fixVideo && st.size > MAX_VIDEO_REENCODE_BYTES) fixVideo = false;
-  if (!fixAudio && !fixVideo) return streamFileWithRange(req, res, abs, mime, st);
+  const fixVideo = videoNeedsRemux(info.video) && st.size <= MAX_VIDEO_REENCODE_BYTES;
+  if (!fixAudio && !fixVideo) return { st, needsConversion: false, playable: null };
 
-  try {
-    const copy = await ensurePlayableCopy(abs, st, fixAudio, fixVideo);
-    return streamFileWithRange(req, res, copy, 'video/mp4', fs.statSync(copy));
-  } catch (err) {
-    logDetail('playable copy failed', err);
-    return streamFileWithRange(req, res, abs, mime, st);
+  return { st, needsConversion: true, playable: getPlayableState(tools, abs, st, fixAudio, fixVideo, info.duration) };
+}
+
+async function servePlayable(req: express.Request, res: express.Response, abs: string, mime: string) {
+  const resolved = await resolvePlayable(req, res, abs);
+  if (!resolved) return;
+  if (!resolved.needsConversion) return streamFileWithRange(req, res, abs, mime, resolved.st);
+
+  const playable = resolved.playable!;
+  if (playable.state === 'converting') {
+    return res.status(202).json({ status: 'converting', percent: playable.percent });
   }
+  if (playable.state === 'failed') {
+    return streamFileWithRange(req, res, abs, mime, resolved.st);
+  }
+  return streamFileWithRange(req, res, playable.file, 'video/mp4', fs.statSync(playable.file));
+}
+
+async function sendPlayableStatus(req: express.Request, res: express.Response, abs: string) {
+  const resolved = await resolvePlayable(req, res, abs);
+  if (!resolved) return;
+  if (!resolved.needsConversion) return res.json({ status: 'original' });
+
+  const playable = resolved.playable!;
+  if (playable.state === 'converting') return res.json({ status: 'converting', percent: playable.percent });
+  if (playable.state === 'failed') return res.json({ status: 'failed', percent: playable.percent, error: playable.error });
+  return res.json({ status: 'ready', percent: 100 });
 }
 
 // Server-side video poster so unsupported codecs (HEVC) still get a thumbnail
@@ -1206,6 +1317,14 @@ app.get('/api/storage/video-thumbnail', (req, res) => {
   const abs = date && name && resolveInMediaDir(date, name);
   if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
   void serveVideoThumbnail(req, res, abs);
+});
+
+app.get('/api/storage/stream/status', (req, res) => {
+  const date = safeFolder(req.query.date);
+  const name = safeFileName(req.query.name);
+  const abs = date && name && resolveInMediaDir(date, name);
+  if (!abs) return res.status(400).json({ error: 'That file name or date is not valid.' });
+  void sendPlayableStatus(req, res, abs);
 });
 
 app.get('/api/storage/stream', (req, res) => {
@@ -1563,6 +1682,14 @@ app.get('/api/library/stream', (req, res) => {
   const mime = libraryMime(abs);
   if (!mime || !mime.startsWith('video/')) return res.status(404).json({ error: 'That file is not a supported video.' });
   void servePlayable(req, res, abs, mime);
+});
+
+app.get('/api/library/stream/status', (req, res) => {
+  const root = rootById(req.query.root);
+  if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const abs = resolveInRoot(root, req.query.path);
+  if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
+  void sendPlayableStatus(req, res, abs);
 });
 
 function needsRefresh(conn: StoredConnection): boolean {

@@ -89,13 +89,15 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const [useRawSource, setUseRawSource] = useState(false);
   const [forceAudioFix, setForceAudioFix] = useState(false);
   const [noAudioTrack, setNoAudioTrack] = useState(false);
+  const [streamReady, setStreamReady] = useState(false);
+  const [streamPercent, setStreamPercent] = useState<number | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const resumeAtRef = useRef<number | null>(null);
   const streamUrl = streamSourceFor(item);
-  const videoSource = useRawSource || !streamUrl
-    ? item?.url
-    : forceAudioFix
-      ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}force=1`
-      : streamUrl;
+  const activeStreamUrl = streamUrl && forceAudioFix
+    ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}force=1`
+    : streamUrl;
+  const videoSource = useRawSource || !activeStreamUrl ? item?.url : activeStreamUrl;
 
   useEffect(() => {
     setDimensions(item?.width && item?.height ? { width: item.width, height: item.height } : null);
@@ -116,6 +118,43 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
       };
     }
   }, [item?.id, item?.url, item?.thumbnailUrl, item?.width, item?.height, item?.duration, isVideo]);
+
+  // Wait for the background conversion before pointing the player at the stream,
+  // otherwise the browser gets a 202 and reports the clip as unplayable.
+  useEffect(() => {
+    setStreamReady(false);
+    setStreamPercent(null);
+    setStreamError(null);
+    if (!isVideo || !activeStreamUrl || useRawSource) {
+      setStreamReady(true);
+      return;
+    }
+    let alive = true;
+    const statusUrl = activeStreamUrl.replace('/stream?', '/stream/status?');
+
+    const poll = async () => {
+      try {
+        const res = await fetch(statusUrl);
+        const data = await res.json();
+        if (!alive) return;
+        if (data.status === 'converting') {
+          setStreamPercent(typeof data.percent === 'number' ? data.percent : null);
+          setTimeout(poll, 1200);
+        } else if (data.status === 'failed') {
+          setStreamError(data.error || 'The clip could not be converted for playback.');
+        } else {
+          setStreamReady(true);
+        }
+      } catch {
+        if (alive) setStreamReady(true);
+      }
+    };
+    poll();
+
+    return () => {
+      alive = false;
+    };
+  }, [isVideo, activeStreamUrl, useRawSource, item?.id, videoReloadKey]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -204,7 +243,17 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           )}
 
           <div className="absolute inset-0 flex items-center justify-center px-14 sm:px-16 py-3">
-            {isVideo ? (
+            {isVideo && !streamReady && !streamError ? (
+              <div className="text-center text-white/85">
+                <Loader2 className="w-6 h-6 animate-spin mx-auto mb-3" />
+                <p className="text-sm font-semibold">
+                  Converting for playback{streamPercent != null ? ` · ${streamPercent}%` : '...'}
+                </p>
+                <p className="text-[11px] text-white/45 mt-1">
+                  This clip needs a browser-friendly copy. It only happens once per file.
+                </p>
+              </div>
+            ) : isVideo ? (
               <video
                 key={`${item.id}-${videoReloadKey}-${useRawSource ? 'raw' : forceAudioFix ? 'forced' : 'stream'}`}
                 src={videoSource}
@@ -269,29 +318,29 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           )}
           </div>
 
-          {isVideo && videoStatus === 'loading' && (
+          {isVideo && streamReady && videoStatus === 'loading' && (
             <div className="absolute inset-0 flex items-end justify-center pb-16 pointer-events-none">
               <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-black/70 text-white text-xs">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                {videoSource === item.url
-                  ? 'Loading video...'
-                  : 'Preparing a browser-friendly stream (first play converts audio)...'}
+                {videoSource === item.url ? 'Loading video...' : 'Loading converted stream...'}
               </div>
             </div>
           )}
 
-          {isVideo && videoStatus === 'error' && (
+          {isVideo && (videoStatus === 'error' || Boolean(streamError)) && (
             <div className="absolute inset-0 flex items-center justify-center">
-              <div className="max-w-xs text-center px-4 py-4 rounded-[10px] bg-black/75 border border-white/15 text-white">
+              <div className="max-w-sm text-center px-4 py-4 rounded-[10px] bg-black/75 border border-white/15 text-white">
                 <AlertCircle className="w-6 h-6 mx-auto mb-2 text-amber-400" />
                 <p className="text-sm font-semibold">This video could not be played</p>
                 <p className="text-[11px] text-white/60 mt-1">
-                  The file may still be loading or the backend restarted. Retry, or open the original file.
+                  {streamError || 'The file may still be loading or the backend restarted. Retry, or open the original file.'}
                 </p>
                 <div className="flex items-center justify-center gap-2 mt-3">
                   <button
                     onClick={() => {
                       setVideoStatus('loading');
+                      setStreamError(null);
+                      setUseRawSource(false);
                       setVideoReloadKey((n) => n + 1);
                     }}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#020520] bg-white hover:bg-white/90 rounded-[6px]"
