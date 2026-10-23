@@ -6,7 +6,6 @@ import {
   ScheduledPost,
   MediaItem,
 } from './types';
-import { INITIAL_POSTS } from './data/initialPosts';
 import { Header } from './components/Header';
 import { PlatformFilterBar } from './components/PlatformFilterBar';
 import { CalendarHeader } from './components/Calendar/CalendarHeader';
@@ -22,10 +21,9 @@ import { CheckCircle2, Info } from 'lucide-react';
 import { getAllStoredMedia, saveMediaItemToStorage } from './utils/mediaStorage';
 import { processFileToMediaItem, validateFileSize } from './utils/mediaUtils';
 
-const STORAGE_KEY = 'relate_social_scheduled_posts_v1';
+const STORAGE_KEY = 'relate_social_scheduled_posts_v2';
 
 export default function App() {
-  // Load posts from localStorage if available, otherwise use initial sample posts
   const [posts, setPosts] = useState<ScheduledPost[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -35,7 +33,7 @@ export default function App() {
     } catch {
       // fallback
     }
-    return INITIAL_POSTS;
+    return [];
   });
 
   // Keep localStorage in sync
@@ -60,8 +58,8 @@ export default function App() {
       });
   }, []);
 
-  // Calendar State (Default to October 2026 matching demo posts)
-  const [currentDate, setCurrentDate] = useState<Date>(() => new Date(2026, 9, 21));
+  // Calendar State
+  const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
   const [viewMode, setViewMode] = useState<CalendarViewMode>('month');
 
   // Filter State

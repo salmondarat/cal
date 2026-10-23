@@ -5,7 +5,6 @@ import {
   UploadCloud,
   Calendar,
   Clock,
-  Sparkles,
   Trash2,
   CheckCircle2,
   AlertCircle,
@@ -98,55 +97,6 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
     } finally {
       setIsUploading(false);
     }
-  };
-
-  // Instant pre-packaged 4-post demo video & carousel campaign
-  const handleLoadSampleCampaignMedia = async () => {
-    const sampleBatch: MediaItem[] = [
-      {
-        id: `bulk-media-1-${Date.now()}`,
-        name: 'part1_crm_collaboration_reel.mp4',
-        url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-        size: 38400000,
-        type: 'video/mp4',
-        duration: 15,
-        width: 1080,
-        height: 1920,
-      },
-      {
-        id: `bulk-media-2-${Date.now()}`,
-        name: 'part2_pipeline_insights_infographic.png',
-        url: 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80',
-        size: 4200000,
-        type: 'image/jpeg',
-        width: 1200,
-        height: 800,
-      },
-      {
-        id: `bulk-media-3-${Date.now()}`,
-        name: 'part3_customer_interview_story.mp4',
-        url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4',
-        size: 29000000,
-        type: 'video/mp4',
-        duration: 22,
-        width: 1920,
-        height: 1080,
-      },
-      {
-        id: `bulk-media-4-${Date.now()}`,
-        name: 'part4_design_system_preview.png',
-        url: 'https://images.unsplash.com/photo-1507238691740-187a5b1d37b8?auto=format&fit=crop&w=1200&q=80',
-        size: 5100000,
-        type: 'image/jpeg',
-        width: 1200,
-        height: 800,
-      },
-    ];
-
-    for (const item of sampleBatch) {
-      await saveMediaItemToStorage(item);
-    }
-    setMediaItems(sampleBatch);
   };
 
   const removeMediaItem = (id: string) => {
@@ -358,14 +308,6 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
               <label className="text-xs font-semibold text-neutral-800">
                 Campaign Media Queue ({mediaItems.length} assets · {formatBytes(totalSize)})
               </label>
-              <button
-                type="button"
-                onClick={handleLoadSampleCampaignMedia}
-                className="text-[11px] font-medium text-[#0000ee] hover:underline cursor-pointer flex items-center gap-1"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Load 4-Part Sample Series</span>
-              </button>
             </div>
 
             {uploadError && (

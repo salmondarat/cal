@@ -19,6 +19,9 @@ export default defineConfig(({mode}) => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // localtest.me resolves to 127.0.0.1 — used for Meta OAuth when
+      // "localhost" is not accepted as an App Domain.
+      allowedHosts: ['.localtest.me', '.trycloudflare.com', '.internalc.my.id'],
       proxy: {
         '/auth': `http://localhost:${oauthPort}`,
         '/api': `http://localhost:${oauthPort}`,

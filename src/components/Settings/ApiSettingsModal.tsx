@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Key,
@@ -8,9 +8,7 @@ import {
   Eye,
   EyeOff,
   RefreshCw,
-  ExternalLink,
   Lock,
-  Sparkles,
 } from 'lucide-react';
 import { PlatformId, PlatformApiCredentials } from '../../types';
 import { ALL_PLATFORM_IDS, PLATFORMS } from '../../constants/platforms';
@@ -22,70 +20,18 @@ interface ApiSettingsModalProps {
   onSaveCredentials?: (credentials: Record<PlatformId, PlatformApiCredentials>) => void;
 }
 
-const STORAGE_API_KEY = 'relate_social_api_credentials_v1';
-
-const SANDBOX_DEMO_CREDENTIALS: Record<PlatformId, PlatformApiCredentials> = {
-  instagram: {
-    platformId: 'instagram',
-    isConnected: true,
-    apiKey: 'IG_APP_982401928301',
-    apiSecret: 'sh_live_sec_892301982301923',
-    accessToken: 'EAABwzLIX45YBA...instagram_long_lived_token',
-    accountId: '17841400293847291',
-    environment: 'production',
-    lastTested: 'Verified 2 mins ago',
-    permissions: ['instagram_basic', 'instagram_content_publish', 'pages_show_list'],
-  },
-  facebook: {
-    platformId: 'facebook',
-    isConnected: true,
-    apiKey: 'FB_APP_77218391029',
-    accessToken: 'EAACEdEose0cBA...meta_page_token',
-    accountId: '109283746192837',
-    environment: 'production',
-    lastTested: 'Verified today',
-    permissions: ['pages_manage_posts', 'pages_read_engagement', 'publish_video'],
-  },
-  threads: {
-    platformId: 'threads',
-    isConnected: true,
-    accessToken: 'TH_TOK_9928374102938475',
-    accountId: 'relatesales_official',
-    environment: 'production',
-    lastTested: 'Verified 1 hour ago',
-    permissions: ['threads_basic', 'threads_content_publish'],
-  },
-  tiktok: {
-    platformId: 'tiktok',
-    isConnected: true,
-    apiKey: 'aw_client_key_91028374',
-    apiSecret: 'sec_tt_live_771928374610293',
-    accessToken: 'act.tiktok_open_token_882910293',
-    accountId: '@relatesales',
-    environment: 'production',
-    lastTested: 'Verified yesterday',
-    permissions: ['video.publish', 'video.upload'],
-  },
-  youtube: {
-    platformId: 'youtube',
-    isConnected: true,
-    apiKey: 'AIzaSyA889234910293847-YouTubeDataV3',
-    accountId: 'UC_RelateModernCRM2026',
-    accessToken: 'ya29.a0AfH6SM...google_oauth_bearer',
-    environment: 'production',
-    lastTested: 'Verified 3 hours ago',
-    permissions: ['youtube.upload', 'youtube.readonly'],
-  },
-};
-
-const DEFAULT_CREDENTIALS: Record<PlatformId, PlatformApiCredentials> = {
-  ...SANDBOX_DEMO_CREDENTIALS,
-  instagram: { ...SANDBOX_DEMO_CREDENTIALS.instagram, isConnected: false, apiKey: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
-  facebook: { ...SANDBOX_DEMO_CREDENTIALS.facebook, isConnected: false, apiKey: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
-  tiktok: { ...SANDBOX_DEMO_CREDENTIALS.tiktok, isConnected: false, apiKey: '', apiSecret: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
-  threads: { ...SANDBOX_DEMO_CREDENTIALS.threads, isConnected: false, accessToken: '', accountId: '', lastTested: 'Not connected' },
-  youtube: { ...SANDBOX_DEMO_CREDENTIALS.youtube, isConnected: false, apiKey: '', accessToken: '', accountId: '', lastTested: 'Not connected' },
-};
+const EMPTY_CREDENTIALS = Object.fromEntries(
+  ALL_PLATFORM_IDS.map((id) => [
+    id,
+    {
+      platformId: id,
+      isConnected: false,
+      environment: 'production',
+      lastTested: 'Not connected',
+      permissions: [],
+    } satisfies PlatformApiCredentials,
+  ]),
+) as unknown as Record<PlatformId, PlatformApiCredentials>;
 
 interface ServerConnection {
   connected: boolean;
@@ -101,13 +47,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   onClose,
   onSaveCredentials,
 }) => {
-  const [credentials, setCredentials] = useState<Record<PlatformId, PlatformApiCredentials>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_API_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return DEFAULT_CREDENTIALS;
-  });
+  const [credentials, setCredentials] = useState<Record<PlatformId, PlatformApiCredentials>>(EMPTY_CREDENTIALS);
 
   const [activeTab, setActiveTab] = useState<PlatformId>('instagram');
   const [showTokens, setShowTokens] = useState<Record<string, boolean>>({});
@@ -118,12 +58,6 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     success: boolean;
     message: string;
   } | null>(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_API_KEY, JSON.stringify(credentials));
-    } catch {}
-  }, [credentials]);
 
   const applyServerConnections = (conns: Record<string, ServerConnection>) => {
     setCredentials((prev) => {
@@ -151,7 +85,10 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
           };
         }
       };
-      sync(['facebook', 'instagram'], conns.meta);
+      sync(['facebook'], conns.meta);
+      // Instagram tab: standalone Instagram Login wins; a Meta connection with a
+      // connected IG account also counts.
+      sync(['instagram'], conns.instagram || (conns.meta && conns.meta.accountNames.some((n) => n.includes('@')) ? conns.meta : undefined));
       sync(['threads'], conns.threads);
       sync(['tiktok'], conns.tiktok);
       sync(['youtube'], conns.youtube);
@@ -159,9 +96,12 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     });
   };
 
+  const [serverConns, setServerConns] = useState<Record<string, ServerConnection>>({});
+
   const refreshConnections = async () => {
     try {
       const conns = await fetch('/api/connections').then((r) => r.json());
+      setServerConns(conns);
       applyServerConnections(conns);
       return conns as Record<string, ServerConnection>;
     } catch {
@@ -178,39 +118,67 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  const pollTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const onMessage = async (ev: MessageEvent) => {
+      const d = ev.data;
+      if (!d || d.type !== 'relate-oauth') return;
+      if (pollTimerRef.current !== null) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      const conns = await refreshConnections();
+      setConnecting(null);
+      if (d.ok) {
+        setTestResult({
+          success: true,
+          message: d.message || `${d.platform} connected.`,
+        });
+      } else {
+        setTestResult({ success: false, message: `${d.platform}: ${d.message || 'consent failed'}` });
+      }
+      return conns;
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!isOpen) return null;
 
   const currentCred = credentials[activeTab];
   const pConfig = PLATFORMS[activeTab];
+  const instagramViaMeta = Boolean(
+    serverConns.meta && !serverConns.instagram && serverConns.meta.accountNames.some((n) => n.includes('@')),
+  );
 
   const toggleShowToken = (key: string) => {
     setShowTokens((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const updateField = (field: keyof PlatformApiCredentials, value: any) => {
-    setCredentials((prev) => ({
-      ...prev,
-      [activeTab]: {
-        ...prev[activeTab],
-        [field]: value,
-      },
-    }));
-  };
-
   const OAUTH_START_PATH: Record<PlatformId, string> = {
-    instagram: '/auth/meta/start',
+    instagram: '/auth/instagram/start',
     facebook: '/auth/meta/start',
     threads: '/auth/threads/start',
     tiktok: '/auth/tiktok/start',
     youtube: '/auth/google/start',
   };
 
-  const CONNECTION_GROUP: Record<PlatformId, 'meta' | 'threads' | 'tiktok' | 'youtube'> = {
-    instagram: 'meta',
+  const CONNECTION_GROUP: Record<PlatformId, 'meta' | 'threads' | 'tiktok' | 'youtube' | 'instagram'> = {
+    instagram: 'instagram',
     facebook: 'meta',
     threads: 'threads',
     tiktok: 'tiktok',
     youtube: 'youtube',
+  };
+
+  const OAUTH_PROVIDER: Record<PlatformId, string> = {
+    instagram: 'Instagram',
+    facebook: 'Meta',
+    threads: 'Meta',
+    tiktok: 'TikTok',
+    youtube: 'Google',
   };
 
   const handleConnect = async (platformId: PlatformId) => {
@@ -221,31 +189,52 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       setServerError('OAuth backend is not running. Start it with `npm run dev:server`.');
       return;
     }
+    if (probeRes.status === 400) {
+      const data = await probeRes.json().catch(() => ({}));
+      setTestResult({ success: false, message: data.error || 'OAuth provider is not configured on the backend.' });
+      return;
+    }
     setConnecting(platformId);
-    window.open(oauthPath, 'relate-oauth', 'width=580,height=760,menubar=no,toolbar=no');
+    setTestResult(null);
+    const tab = window.open(oauthPath, '_blank');
+    if (!tab) {
+      setConnecting(null);
+      setTestResult({ success: false, message: 'The browser blocked the login tab. Allow popups for this site and try again.' });
+      return;
+    }
 
-    const started = Date.now();
     const group = CONNECTION_GROUP[platformId];
-    const poll = window.setInterval(async () => {
-      try {
-        const conns = await fetch('/api/connections').then((r) => r.json());
-        if (conns[group]) {
-          window.clearInterval(poll);
-          setConnecting(null);
-          applyServerConnections(conns);
-          setTestResult({
-            success: true,
-            message: `Live OAuth completed for ${conns[group].accountNames.join(', ')}.`,
-          });
-        } else if (Date.now() - started > 180000) {
-          window.clearInterval(poll);
-          setConnecting(null);
-        }
-      } catch {
-        window.clearInterval(poll);
-        setConnecting(null);
+    const started = Date.now();
+    const finish = (success: boolean, message: string) => {
+      if (pollTimerRef.current !== null) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
       }
-    }, 2000);
+      setConnecting(null);
+      setTestResult({ success, message });
+    };
+    const poll = window.setInterval(async () => {
+      let conns: Record<string, ServerConnection>;
+      try {
+        conns = await fetch('/api/connections').then((r) => r.json());
+      } catch {
+        return finish(false, 'Lost contact with the OAuth backend — is `npm run dev:server` still running?');
+      }
+      if (conns[group]) {
+        applyServerConnections(conns);
+        return finish(true, `Live OAuth completed for ${conns[group].accountNames.join(', ')}.`);
+      }
+      if (tab.closed) {
+        return finish(
+          false,
+          'Login tab was closed before the connection finished — nothing was stored. Click Connect to try again.',
+        );
+      }
+      if (Date.now() - started > 90000) {
+        return finish(false, 'No completed connection after 90s. Check the login tab for an error (consent denied, wrong redirect URI, or account not a tester).');
+      }
+    }, 1500);
+    pollTimerRef.current = poll;
   };
 
   const handleTestConnection = async (platformId: PlatformId) => {
@@ -281,15 +270,6 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     await fetch(`/api/disconnect/${CONNECTION_GROUP[platformId]}`, { method: 'POST' }).catch(() => {});
     await refreshConnections();
     setTestResult(null);
-  };
-
-  const handleResetDefaults = async () => {
-    setCredentials(SANDBOX_DEMO_CREDENTIALS);
-    await refreshConnections();
-    setTestResult({
-      success: true,
-      message: 'Sandbox demo credentials loaded. Live OAuth connections from the backend are shown as-is.',
-    });
   };
 
   return (
@@ -384,8 +364,55 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
               </div>
 
               {/* Status Action */}
-              <div className="flex items-center gap-2">
-                {currentCred.isConnected ? (
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                {activeTab === 'instagram' ? (
+                  <>
+                    {serverConns.instagram ? (
+                      <>
+                        <span className="text-[11px] text-emerald-700 font-mono">
+                          @{serverConns.instagram.accountNames[0]?.replace('@', '')} · Instagram Login
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleDisconnect('instagram')}
+                          className="px-2.5 py-1 text-xs text-red-600 hover:bg-red-50 border border-red-200 rounded-[6px] transition-colors"
+                        >
+                          Disconnect
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={connecting === 'instagram'}
+                        onClick={() => handleConnect('instagram')}
+                        className="px-2.5 py-1 text-xs text-[#0000ee] hover:bg-blue-50 border border-blue-200 rounded-[6px] transition-colors font-medium disabled:opacity-50"
+                      >
+                        {connecting === 'instagram' ? 'Waiting for Instagram approval...' : 'Connect via Instagram Login'}
+                      </button>
+                    )}
+                    {instagramViaMeta ? (
+                      <span className="text-[11px] text-neutral-500">
+                        also connected via Facebook Page ·{' '}
+                        <button
+                          type="button"
+                          onClick={() => handleDisconnect('facebook')}
+                          className="text-red-600 hover:underline cursor-pointer"
+                        >
+                          disconnect
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={connecting === 'facebook'}
+                        onClick={() => handleConnect('facebook')}
+                        className="px-2.5 py-1 text-xs text-neutral-700 hover:bg-neutral-100 border border-neutral-300 rounded-[6px] transition-colors font-medium disabled:opacity-50"
+                      >
+                        {connecting === 'facebook' ? 'Waiting for Meta approval...' : 'Connect via Facebook Page'}
+                      </button>
+                    )}
+                  </>
+                ) : currentCred.isConnected ? (
                   <button
                     type="button"
                     onClick={() => handleDisconnect(activeTab)}
@@ -402,7 +429,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   >
                     {connecting === activeTab
                       ? 'Waiting for OAuth approval...'
-                      : `Connect via ${activeTab === 'tiktok' ? 'TikTok' : activeTab === 'youtube' ? 'Google' : 'Meta'} OAuth`}
+                      : `Connect via ${OAUTH_PROVIDER[activeTab]} OAuth`}
                   </button>
                 )}
               </div>
@@ -450,9 +477,10 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                 <input
                   type="text"
                   value={currentCred.accountId || ''}
-                  onChange={(e) => updateField('accountId', e.target.value)}
-                  placeholder="e.g. 17841400293847291"
-                  className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                  readOnly
+                  disabled
+                  placeholder="Filled automatically after Connect"
+                  className="w-full px-3 py-1.5 text-xs bg-neutral-50 border border-neutral-200 rounded-[8px] font-mono disabled:text-neutral-500"
                 />
               </div>
 
@@ -484,42 +512,12 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   <input
                     type={showTokens[`${activeTab}_token`] ? 'text' : 'password'}
                     value={currentCred.accessToken || ''}
-                    onChange={(e) => updateField('accessToken', e.target.value)}
+                    readOnly
                     disabled
                     placeholder="Managed by the OAuth backend after Connect"
                     className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono focus:outline-none focus:ring-1 focus:ring-[#0000ee] disabled:bg-neutral-50 disabled:text-neutral-500"
                   />
                   <Lock className="w-3.5 h-3.5 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                </div>
-              </div>
-
-              {/* App Secret or API Key if applicable */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-neutral-800 mb-1 block">
-                    App Client Key / ID
-                  </label>
-                  <input
-                    type="text"
-                    value={currentCred.apiKey || ''}
-                    onChange={(e) => updateField('apiKey', e.target.value)}
-                    placeholder="Client ID from developer console"
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-neutral-800 mb-1 block">
-                    Environment
-                  </label>
-                  <select
-                    value={currentCred.environment}
-                    onChange={(e) => updateField('environment', e.target.value as any)}
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px]"
-                  >
-                    <option value="production">Production API</option>
-                    <option value="sandbox">Developer Sandbox / Mock</option>
-                  </select>
                 </div>
               </div>
 
@@ -570,16 +568,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 border-t border-neutral-200 flex items-center justify-between bg-neutral-50/70">
-          <button
-            type="button"
-            onClick={handleResetDefaults}
-            className="text-xs text-neutral-600 hover:text-[#0000ee] hover:underline flex items-center gap-1 cursor-pointer"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Load Sandbox Demo Keys</span>
-          </button>
-
+        <div className="px-5 py-3.5 border-t border-neutral-200 flex items-center justify-end bg-neutral-50/70">
           <button
             onClick={() => {
               onSaveCredentials?.(credentials);

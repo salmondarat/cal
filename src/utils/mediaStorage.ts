@@ -1,5 +1,4 @@
 import { MediaItem } from '../types';
-import { SAMPLE_MEDIA_LIBRARY } from './mediaUtils';
 
 const DB_NAME = 'RelateSocialMediaDB';
 const DB_VERSION = 1;
@@ -154,9 +153,7 @@ export async function getAllStoredMedia(): Promise<MediaItem[]> {
   if (await serverAvailable()) {
     try {
       const items = await getAllFromServer();
-      if (items.length > 0) return items;
-      // First boot on a fresh disk: show the sample library (remote URLs, not copied).
-      return SAMPLE_MEDIA_LIBRARY.flatMap((cat) => cat.items);
+      return items;
     } catch (e) {
       console.warn('Universal media scan failed, falling back to IndexedDB:', e);
     }
@@ -171,17 +168,7 @@ export async function getAllStoredMedia(): Promise<MediaItem[]> {
       req.onerror = () => reject(req.error);
     });
 
-    if (items.length > 0) return items;
-
-    // If IndexedDB is empty on first boot, initialize with sample media library
-    const initialItems: MediaItem[] = [];
-    for (const cat of SAMPLE_MEDIA_LIBRARY) {
-      for (const item of cat.items) {
-        await saveMediaItemToStorage(item);
-        initialItems.push(item);
-      }
-    }
-    return initialItems;
+    return items;
   } catch (e) {
     console.warn('Falling back to local storage media:', e);
     return loadFromLocalStorageFallback();

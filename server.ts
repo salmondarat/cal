@@ -19,6 +19,9 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 // Falls back to the main Meta app when THREADS_APP_ID/SECRET are not set.
 const THREADS_APP_ID = process.env.THREADS_APP_ID || META_APP_ID;
 const THREADS_APP_SECRET = process.env.THREADS_APP_SECRET || META_APP_SECRET;
+// Instagram API with Instagram Login (works without access to a personal FB account).
+const IG_APP_ID = process.env.IG_APP_ID || THREADS_APP_ID;
+const IG_APP_SECRET = process.env.IG_APP_SECRET || THREADS_APP_SECRET;
 
 const STORE_DIR = path.resolve('.secrets');
 const STORE_FILE = path.join(STORE_DIR, 'connections.json');
@@ -35,7 +38,7 @@ interface StoredConnection {
   metaPages?: { id: string; name: string; accessToken: string; instagramId?: string; instagramUsername?: string }[];
 }
 
-type Store = Partial<Record<'meta' | 'tiktok' | 'youtube' | 'threads', StoredConnection>>;
+type Store = Partial<Record<'meta' | 'tiktok' | 'youtube' | 'threads' | 'instagram', StoredConnection>>;
 
 function loadStore(): Store {
   try {
@@ -95,10 +98,11 @@ function missingConfig(res: express.Response, keys: string[]) {
 }
 
 function callbackHtml(platformName: string, ok: boolean, detail: string): string {
+  const plain = detail.replace(/<[^>]+>/g, '');
   return `<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding:40px">
 <h2>${ok ? `${platformName} connected` : `${platformName} connection failed`}</h2><p>${detail}</p>
 <script>
-if (window.opener) window.opener.postMessage({ type: 'relate-oauth', platform: '${platformName}', ok: ${ok} }, '*');
+if (window.opener) window.opener.postMessage({ type: 'relate-oauth', platform: '${platformName}', ok: ${ok}, message: ${JSON.stringify(plain)} }, '*');
 setTimeout(() => window.close(), 1500);
 </script></body></html>`;
 }
@@ -473,6 +477,84 @@ app.get('/auth/threads/callback', async (req, res) => {
   }
 });
 
+// ---------- Instagram (API with Instagram Login — no personal FB account needed) ----------
+
+const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publish'];
+
+app.get('/auth/instagram/start', (_req, res) => {
+  if (!IG_APP_ID || !IG_APP_SECRET) {
+    res.status(400).json({
+      error: 'Missing IG_APP_ID / IG_APP_SECRET (falls back to THREADS_* then META_*). See docs/platform-setup.md',
+    });
+    return;
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  const redirectUri = `${APP_BASE}/auth/instagram/callback`;
+  rememberState(state, { platform: 'instagram', redirectUri });
+  const url =
+    'https://www.instagram.com/oauth/authorize' +
+    `?client_id=${encodeURIComponent(IG_APP_ID)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    '&response_type=code' +
+    `&scope=${encodeURIComponent(IG_SCOPES.join(','))}` +
+    `&state=${state}`;
+  res.redirect(url);
+});
+
+app.get('/auth/instagram/callback', async (req, res) => {
+  const { code, state, error_message, error_type } = req.query as Record<string, string>;
+  if (error_message || error_type) return res.send(callbackHtml('Instagram', false, error_message || error_type));
+  const pending = consumeState(state);
+  if (!code || !pending || pending.platform !== 'instagram') {
+    return res.send(callbackHtml('Instagram', false, 'Invalid or expired OAuth state.'));
+  }
+  try {
+    const exchange = await fetch('https://api.instagram.com/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: IG_APP_ID,
+        client_secret: IG_APP_SECRET,
+        grant_type: 'authorization_code',
+        redirect_uri: pending.redirectUri,
+        code,
+      }),
+    });
+    const short: any = await exchange.json();
+    if (short.error_message) throw new Error(`${short.error_type || 'instagram'}: ${short.error_message}`);
+
+    const longRes = await fetch(
+      `https://graph.instagram.com/${GRAPH_VERSION}/access_token?grant_type=ig_exchange_token` +
+        `&client_secret=${encodeURIComponent(IG_APP_SECRET)}` +
+        `&access_token=${encodeURIComponent(short.access_token)}`,
+    );
+    const long: any = await longRes.json();
+    if (long.error_message) throw new Error(long.error_message);
+
+    const meRes = await fetch(
+      `https://graph.instagram.com/${GRAPH_VERSION}/me?fields=user_id,username`,
+      { headers: { Authorization: `Bearer ${long.access_token}` } },
+    );
+    const me: any = await meRes.json();
+    if (me.error) throw new Error(me.error.message);
+
+    const store = loadStore();
+    store.instagram = {
+      accessToken: long.access_token,
+      tokenType: 'ig_long_lived_user',
+      expiresAt: Date.now() + (long.expires_in ? long.expires_in * 1000 : 58 * 86400 * 1000),
+      accountIds: [me.user_id || me.id],
+      accountNames: [`@${me.username}`],
+      scopes: IG_SCOPES,
+      connectedAt: new Date().toISOString(),
+    };
+    saveStore(store);
+    res.send(callbackHtml('Instagram', true, `Connected as <b>@${me.username}</b>.`));
+  } catch (err: any) {
+    res.send(callbackHtml('Instagram', false, err.message));
+  }
+});
+
 // ---------- Universal media storage (date folders) ----------
 
 const DATA_DIR = process.env.RELATE_DATA_DIR
@@ -659,7 +741,7 @@ function needsRefresh(conn: StoredConnection): boolean {
   return Boolean(conn.expiresAt && conn.expiresAt - Date.now() < 5 * 60 * 1000);
 }
 
-async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads'): Promise<string> {
+async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads' | 'instagram'): Promise<string> {
   const store = loadStore();
   const conn = store[storeKey];
   if (!conn) throw new Error('Not connected.');
@@ -694,6 +776,12 @@ async function freshAccessToken(storeKey: 'tiktok' | 'youtube' | 'threads'): Pro
     });
     next = await res.json();
     if (next.error || !next.access_token) throw new Error(`${next.error}: ${next.error_description || 'Google refresh failed'}`);
+  } else if (storeKey === 'instagram') {
+    const res = await fetch(
+      `https://graph.instagram.com/access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(conn.accessToken)}`,
+    );
+    next = await res.json();
+    if (next.error_message || next.error) throw new Error(next.error_message || next.error?.message || 'Instagram token refresh failed — reconnect.');
   } else {
     const res = await fetch(
       `https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=${encodeURIComponent(conn.accessToken)}`,
@@ -719,6 +807,7 @@ app.get('/api/health', (_req, res) => {
     tiktokConfigured: Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET),
     youtubeConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET),
     threadsConfigured: Boolean(META_APP_ID && META_APP_SECRET),
+    instagramLoginConfigured: Boolean(IG_APP_ID && IG_APP_SECRET),
     graphVersion: GRAPH_VERSION,
     redirectBase: APP_BASE,
   });
@@ -733,6 +822,22 @@ app.post('/api/verify/:platform', async (req, res) => {
   const store = loadStore();
 
   try {
+    if (platform === 'instagram' && store.instagram) {
+      const accessToken = await freshAccessToken('instagram');
+      const meRes = await fetch(`https://graph.instagram.com/${GRAPH_VERSION}/me?fields=user_id,username`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const me: any = await meRes.json();
+      if (me.error) return res.status(502).json({ error: `Instagram API: ${me.error.message}` });
+      return res.json({
+        platform,
+        ok: true,
+        identity: `@${me.username} (${me.user_id})`,
+        via: 'Instagram Login',
+        checkedAt: new Date().toISOString(),
+      });
+    }
+
     if (platform === 'facebook' || platform === 'instagram') {
       const conn = store.meta;
       if (!conn) return res.status(400).json({ error: 'Meta is not connected. Use Connect Platform first.' });
@@ -817,8 +922,8 @@ app.post('/api/verify/:platform', async (req, res) => {
 });
 
 app.post('/api/disconnect/:platform', (req, res) => {
-  const platform = req.params.platform as 'meta' | 'tiktok' | 'youtube' | 'threads';
-  if (!['meta', 'tiktok', 'youtube', 'threads'].includes(platform)) {
+  const platform = req.params.platform as 'meta' | 'tiktok' | 'youtube' | 'threads' | 'instagram';
+  if (!['meta', 'tiktok', 'youtube', 'threads', 'instagram'].includes(platform)) {
     return res.status(400).json({ error: 'Unknown connection.' });
   }
   const store = loadStore();

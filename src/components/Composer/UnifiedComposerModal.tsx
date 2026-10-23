@@ -2,12 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   UploadCloud,
-  Film,
-  Layers,
-  Image as ImageIcon,
   Clock,
   Calendar,
-  Sparkles,
   Trash2,
   AlertCircle,
   CheckCircle2,
@@ -32,7 +28,6 @@ import {
   formatBytes,
   validateFileSize,
   processFileToMediaItem,
-  SAMPLE_MEDIA_LIBRARY,
 } from '../../utils/mediaUtils';
 import { saveMediaItemToStorage } from '../../utils/mediaStorage';
 
@@ -205,23 +200,6 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
       clearInterval(timer);
       setIsUploading(false);
       setUploadError('Failed to process media files.');
-    }
-  };
-
-  // Add preset sample media from library
-  const handleAddSamplePreset = (categoryIndex: number) => {
-    const presetGroup = SAMPLE_MEDIA_LIBRARY[categoryIndex];
-    if (!presetGroup) return;
-
-    const combined = [...mediaList, ...presetGroup.items];
-    setMediaList(combined);
-
-    if (presetGroup.category.includes('Carousel')) {
-      setBaseFormat('carousel');
-    } else if (presetGroup.category.includes('Video')) {
-      setBaseFormat('video');
-    } else {
-      setBaseFormat('image');
     }
   };
 
@@ -471,33 +449,8 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
               )}
             </div>
 
-            {/* Quick Sample Presets */}
+            {/* Saved storage picker */}
             <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-              <span className="text-[11px] text-neutral-500">Instant Test Presets:</span>
-              <button
-                type="button"
-                onClick={() => handleAddSamplePreset(1)}
-                className="px-2 py-0.5 text-[10px] font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[6px] hover:border-[#1890ff] transition-colors cursor-pointer flex items-center gap-1"
-              >
-                <Film className="w-3 h-3 text-[#0000ee]" />
-                <span>+ 4K Vertical Reel</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAddSamplePreset(2)}
-                className="px-2 py-0.5 text-[10px] font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[6px] hover:border-[#1890ff] transition-colors cursor-pointer flex items-center gap-1"
-              >
-                <Layers className="w-3 h-3 text-[#0000ee]" />
-                <span>+ 3-Slide Carousel</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAddSamplePreset(0)}
-                className="px-2 py-0.5 text-[10px] font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[6px] hover:border-[#1890ff] transition-colors cursor-pointer flex items-center gap-1"
-              >
-                <ImageIcon className="w-3 h-3 text-[#0000ee]" />
-                <span>+ SaaS Dashboard Photo</span>
-              </button>
               {availableStoredMedia.length > 0 && (
                 <button
                   type="button"

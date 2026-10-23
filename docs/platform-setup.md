@@ -1,5 +1,11 @@
 # Connecting real platform APIs (Meta, Threads, TikTok, YouTube)
 
+> **This deployment** serves the app at `https://relate.internalc.my.id` through a
+> named Cloudflare Tunnel (`relate-social` → `localhost:3000`). All callbacks below
+> use `APP_URL`, so the dashboards must register the `https://relate.internalc.my.id/...`
+> variants, not localhost. Keep `npm run dev:server`, `npm run dev`, and
+> `cloudflared tunnel run relate-social` running while testing.
+
 `server.ts` is a small local OAuth backend that owns all secrets and access tokens.
 The browser never sees app secrets; the connection status of **all five platforms**
 in **Settings → API connections** is read live from `/api/connections`.
@@ -31,19 +37,32 @@ cases" only shows compatible ones). So create **two apps**:
    the IG professional account must be linked to a Page you administer.
    (The separate "Instagram API with Instagram Login" app type is NOT needed.)
 
-**App B — "Relate Social Threads" (Threads API):**
-1. Create App again → use case **"Access the Threads API"**.
+**App B — "Relate Social Threads" (Threads API + Instagram Login):**
+1. Create App again → use cases **"Access the Threads API"** and
+   **"Manage messaging & content on Instagram"** (these two CAN share an app).
 2. Copy its **App ID** / **App Secret** into `.env` as `THREADS_APP_ID`,
    `THREADS_APP_SECRET` (falls back to META_* if you leave them empty).
+   `IG_APP_ID`/`IG_APP_SECRET` default to the same THREADS_* pair.
 3. **Threads API → Valid OAuth Redirect URIs** (HTTPS required —
    `redirectmeto.com` proxies localhost):
    ```
    https://redirectmeto.com/http://localhost:3000/auth/threads/callback
    ```
-4. **Threads API → App roles → Threads testers**: add your Threads account and
+4. **Instagram → Valid OAuth Redirect URIs** (Instagram Login):
+   ```
+   http://localhost:3000/auth/instagram/callback
+   ```
+5. **Threads API → App roles → Threads testers**: add your Threads account and
    **accept the invite in the Threads app/website**, otherwise consent is refused.
-5. Scopes requested: `threads_basic`, `threads_content_publish`,
-   `threads_manage_replies` — testers can grant these without App Review.
+6. Scopes requested: `threads_basic`, `threads_content_publish`,
+   `threads_manage_replies` and `instagram_business_basic`,
+   `instagram_business_content_publish` — testers can grant these without App Review.
+
+The **Instagram tab offers two connect options**: *Instagram Login* (log in with
+the IG account itself, no personal Facebook account needed — token on
+`graph.instagram.com`, refreshable via `ig_refresh_token`) or *Facebook Page*
+(IG discovered through the Meta connection in App A). Both can coexist;
+standalone wins in the tab status.
 
 For both apps: **App roles → Roles** — the creator is automatically Administrator,
 which is enough; the "Create test users" (simulated accounts) page can be ignored,
