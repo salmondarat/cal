@@ -974,10 +974,10 @@ function startTranscode(
   child.stdout.on('data', (chunk: string) => {
     if (!duration) return;
     for (const line of chunk.split('\n')) {
-      const match = /^out_time_(us|ms|millis)=(\d+)$/.exec(line.trim());
+      // ffmpeg prints both out_time_us and out_time_ms; both carry microseconds.
+      const match = /^out_time_(?:us|ms|millis)=(\d+)$/.exec(line.trim());
       if (!match) continue;
-      const divisor = match[1] === 'us' ? 1e6 : 1e3;
-      const seconds = Number(match[2]) / divisor;
+      const seconds = Number(match[1]) / 1e6;
       // The final +faststart pass rewrites the file, so hold back the last few percent.
       job.percent = Math.max(job.percent, Math.min(95, (seconds / duration) * 100));
     }
@@ -1060,6 +1060,7 @@ interface PlayableResolution {
   st: fs.Stats;
   needsConversion: boolean;
   playable: PlayableState | null;
+  hasAudio: boolean;
 }
 
 // Returns null when the response (404) has already been sent.
@@ -1073,15 +1074,15 @@ async function resolvePlayable(req: express.Request, res: express.Response, abs:
   }
 
   const [info, tools] = await Promise.all([probeMediaStreams(abs, st), detectFfmpeg()]);
-  if (!info || !tools) return { st, needsConversion: false, playable: null };
+  if (!info || !tools) return { st, needsConversion: false, playable: null, hasAudio: Boolean(info?.audio) };
 
   // ?force=1 normalises audio even when the probe looked fine (browser refused to decode it).
   const force = req.query.force === '1' || req.query.force === 'true';
   const fixAudio = force || audioNeedsRemux(info.audio);
   const fixVideo = videoNeedsRemux(info.video) && st.size <= MAX_VIDEO_REENCODE_BYTES;
-  if (!fixAudio && !fixVideo) return { st, needsConversion: false, playable: null };
+  if (!fixAudio && !fixVideo) return { st, needsConversion: false, playable: null, hasAudio: Boolean(info.audio) };
 
-  return { st, needsConversion: true, playable: getPlayableState(tools, abs, st, fixAudio, fixVideo, info.duration) };
+  return { st, needsConversion: true, playable: getPlayableState(tools, abs, st, fixAudio, fixVideo, info.duration), hasAudio: Boolean(info.audio) };
 }
 
 async function servePlayable(req: express.Request, res: express.Response, abs: string, mime: string) {
@@ -1102,12 +1103,12 @@ async function servePlayable(req: express.Request, res: express.Response, abs: s
 async function sendPlayableStatus(req: express.Request, res: express.Response, abs: string) {
   const resolved = await resolvePlayable(req, res, abs);
   if (!resolved) return;
-  if (!resolved.needsConversion) return res.json({ status: 'original' });
+  if (!resolved.needsConversion) return res.json({ status: 'original', hasAudio: resolved.hasAudio });
 
   const playable = resolved.playable!;
-  if (playable.state === 'converting') return res.json({ status: 'converting', percent: playable.percent });
-  if (playable.state === 'failed') return res.json({ status: 'failed', percent: playable.percent, error: playable.error });
-  return res.json({ status: 'ready', percent: 100 });
+  if (playable.state === 'converting') return res.json({ status: 'converting', percent: playable.percent, hasAudio: resolved.hasAudio });
+  if (playable.state === 'failed') return res.json({ status: 'failed', percent: playable.percent, error: playable.error, hasAudio: resolved.hasAudio });
+  return res.json({ status: 'ready', percent: 100, hasAudio: resolved.hasAudio });
 }
 
 // Server-side video poster so unsupported codecs (HEVC) still get a thumbnail

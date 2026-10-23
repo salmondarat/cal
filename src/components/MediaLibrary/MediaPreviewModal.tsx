@@ -92,7 +92,9 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const [streamReady, setStreamReady] = useState(false);
   const [streamPercent, setStreamPercent] = useState<number | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [serverHasAudio, setServerHasAudio] = useState<boolean | null>(null);
   const resumeAtRef = useRef<number | null>(null);
+  const streamRetriesRef = useRef(0);
   const streamUrl = streamSourceFor(item);
   const activeStreamUrl = streamUrl && forceAudioFix
     ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}force=1`
@@ -108,6 +110,8 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
     setForceAudioFix(false);
     setNoAudioTrack(false);
     resumeAtRef.current = null;
+    streamRetriesRef.current = 0;
+    setServerHasAudio(null);
     if (item && isVideo && !item.thumbnailUrl) {
       let alive = true;
       getVideoThumbnail(item.url).then((result) => {
@@ -130,6 +134,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
       return;
     }
     let alive = true;
+    let fetchFailures = 0;
     const statusUrl = activeStreamUrl.replace('/stream?', '/stream/status?');
 
     const poll = async () => {
@@ -137,6 +142,8 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
         const res = await fetch(statusUrl);
         const data = await res.json();
         if (!alive) return;
+        fetchFailures = 0;
+        if (typeof data.hasAudio === 'boolean') setServerHasAudio(data.hasAudio);
         if (data.status === 'converting') {
           setStreamPercent(typeof data.percent === 'number' ? data.percent : null);
           setTimeout(poll, 1200);
@@ -146,7 +153,12 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           setStreamReady(true);
         }
       } catch {
-        if (alive) setStreamReady(true);
+        // Network hiccup (proxy/tunnel restart): keep polling instead of attaching
+        // a stream that is not ready yet.
+        if (!alive) return;
+        fetchFailures++;
+        if (fetchFailures >= 10) setStreamReady(true);
+        else setTimeout(poll, 1500);
       }
     };
     poll();
@@ -293,8 +305,14 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                 onPlaying={() => setVideoStatus('ready')}
                 onWaiting={() => setVideoStatus('loading')}
                 onError={() => {
-                  if (!useRawSource && streamUrl) {
-                    // Converted stream failed: fall back to the original file.
+                  if (!useRawSource && streamUrl && streamRetriesRef.current < 2) {
+                    // The stream may have been replaced mid-flight (backend restart):
+                    // re-check the conversion status instead of falling back to the
+                    // raw file, which Chrome often cannot fully decode.
+                    streamRetriesRef.current += 1;
+                    setVideoStatus('loading');
+                    setVideoReloadKey((n) => n + 1);
+                  } else if (!useRawSource && streamUrl) {
                     setUseRawSource(true);
                     setVideoStatus('loading');
                   } else {
@@ -394,7 +412,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
               {location}
             </span>
             {formatDateTime(item.uploadedAt) && <span>{formatDateTime(item.uploadedAt)}</span>}
-            {noAudioTrack && (
+            {(noAudioTrack || serverHasAudio === false) && (
               <span className="inline-flex items-center gap-1 text-amber-300" title="No decodable audio track was found in this file.">
                 <AlertCircle className="w-3 h-3" />
                 no audio track
