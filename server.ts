@@ -96,7 +96,7 @@ function maskToken(token: string): string {
 }
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '4mb' }));
 app.use(express.urlencoded({ extended: false }));
 
 function logDetail(scope: string, detail: unknown) {
@@ -486,7 +486,7 @@ app.get('/auth/google/callback', async (req, res) => {
 
 // ---------- Threads (same Meta app, Threads API product enabled) ----------
 
-const THREADS_SCOPES = ['threads_basic', 'threads_content_publish', 'threads_manage_replies'];
+const THREADS_SCOPES = ['threads_basic', 'threads_content_publish', 'threads_delete', 'threads_manage_replies'];
 
 function threadsRedirectUri(): string {
   // Threads requires HTTPS redirect URIs; redirectmeto proxies for local dev.
@@ -1340,7 +1340,9 @@ app.get('/api/storage/stream', (req, res) => {
 
 app.post(
   '/api/storage/media',
-  express.raw({ type: '*/*', limit: `${MAX_MEDIA_BYTES}b` }),
+  // Browsers send an empty Blob without a Content-Type, and body-parser then
+  // skips the body entirely — accept any (or missing) type and read the bytes.
+  express.raw({ type: () => true, limit: `${MAX_MEDIA_BYTES}b` }),
   (req, res) => {
     const date = safeFolder(req.query.date);
     if (!date) return res.status(400).json({ error: 'Choose a valid date in YYYY-MM-DD format.' });
@@ -1944,10 +1946,1308 @@ app.post('/api/instagram/active', (req, res) => {
   res.json({ active: accountId, accountNames: accounts[accountId].accountNames });
 });
 
+// ---------- Publishing: media URLs the platforms can fetch ----------
+
+type PlatformKey = 'instagram' | 'facebook' | 'threads' | 'tiktok' | 'youtube';
+const PUBLISH_PLATFORMS: PlatformKey[] = ['instagram', 'facebook', 'threads', 'tiktok', 'youtube'];
+const PLATFORM_NAMES: Record<PlatformKey, string> = {
+  instagram: 'Instagram',
+  facebook: 'Facebook',
+  threads: 'Threads',
+  tiktok: 'TikTok',
+  youtube: 'YouTube',
+};
+const PLATFORM_CHAR_LIMITS: Record<PlatformKey, number> = {
+  instagram: 2200,
+  facebook: 63206,
+  threads: 500,
+  tiktok: 4000,
+  youtube: 5000,
+};
+
+// ---------- Publishing: server-side post store ----------
+
+interface PlatformResult {
+  status: 'success' | 'failed' | 'skipped';
+  attemptedAt: string;
+  platformPostId?: string;
+  permalink?: string;
+  profileUrl?: string;
+  containerId?: string;
+  error?: string;
+  via?: string;
+  durationMs?: number;
+  deletedAt?: string;
+}
+
+interface MediaRef {
+  kind: 'media' | 'library' | 'remote' | 'missing';
+  name: string;
+  type: string;
+  size: number;
+  date?: string; // media-dir folder (kind=media)
+  path?: string; // file name inside the folder, or library-relative path
+  rootId?: string; // library root id
+  url?: string; // already-public URL (kind=remote)
+}
+
+interface ServerPost {
+  id: string;
+  title: string;
+  campaignName?: string;
+  scheduledDate: string;
+  scheduledTime: string;
+  platforms: PlatformKey[];
+  format: string;
+  media: any[];
+  baseCaption: string;
+  baseHashtags: string[];
+  platformOverrides: Record<string, any>;
+  platformAccounts?: Record<string, string>;
+  status: 'draft' | 'scheduled' | 'publishing' | 'published' | 'partial' | 'failed';
+  createdAt: string;
+  updatedAt: string;
+  publishAt: string;
+  timezone: string;
+  results?: Record<string, PlatformResult>;
+  attempts: number;
+  nextTryAt?: string;
+  lastError?: string;
+  startedAt?: string;
+  publishedAt?: string;
+  deletedAt?: string;
+}
+
+const POSTS_FILE = path.join(DATA_DIR, 'posts.json');
+const LOG_DIR = path.join(DATA_DIR, 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'publish.jsonl');
+const MEDIA_SIGNING_FILE = path.join(STORE_DIR, 'media-signing.key');
+const PUBLIC_MEDIA_TTL_MS = 6 * 60 * 60 * 1000;
+const RETRY_BACKOFF_MS = [2 * 60_000, 10 * 60_000, 30 * 60_000];
+
+function loadPosts(): ServerPost[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(POSTS_FILE, 'utf8'));
+    return Array.isArray(parsed) ? parsed.filter((p: any) => p && typeof p.id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePosts(posts: ServerPost[]) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = `${POSTS_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(posts, null, 2));
+  fs.renameSync(tmp, POSTS_FILE);
+}
+
+function upsertStoredPost(next: ServerPost): ServerPost {
+  const posts = loadPosts();
+  const i = posts.findIndex((p) => p.id === next.id);
+  if (i >= 0) posts[i] = next;
+  else posts.unshift(next);
+  savePosts(posts);
+  return next;
+}
+
+function getStoredPost(id: string): ServerPost | undefined {
+  return loadPosts().find((p) => p.id === id);
+}
+
+function localZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+// Scheduled times are wall-clock strings typed in the calendar; the backend's
+// own clock is the authority for when a post is due.
+function computePublishAt(date: unknown, time: unknown): string | null {
+  const d = typeof date === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date) : null;
+  const t = typeof time === 'string' ? /^(\d{1,2}):(\d{2})$/.exec(time) : null;
+  if (!d || !t) return null;
+  const dt = new Date(Number(d[1]), Number(d[2]) - 1, Number(d[3]), Number(t[1]), Number(t[2]), 0, 0);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt.toISOString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------- Publishing: audit log ----------
+
+function logPublish(event: string, fields: Record<string, unknown> = {}) {
+  const line: Record<string, unknown> = { ts: new Date().toISOString(), event, ...fields };
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, `${JSON.stringify(line)}\n`);
+  } catch (err) {
+    logDetail('publish log write failed', err);
+  }
+  const error = typeof line.error === 'string' ? ` — ${line.error}` : '';
+  console.log(`[relate-publish] ${line.ts} ${event} ${line.postId || '-'} ${line.platform || '-'}${error}`);
+}
+
+function readPublishLog(limit: number, postId?: string) {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(LOG_FILE, 'utf8');
+  } catch {
+    return [];
+  }
+  const lines = raw.split('\n').filter(Boolean);
+  const out: any[] = [];
+  for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      if (!postId || entry.postId === postId) out.push(entry);
+    } catch {}
+  }
+  return out;
+}
+
+// ---------- Publishing: public media URLs ----------
+
+function publicBaseUrl(): string | null {
+  const raw = process.env.PUBLIC_MEDIA_BASE_URL || '';
+  const candidate = raw || APP_BASE;
+  if (!/^https?:\/\//i.test(candidate)) return null;
+  if (/localhost|127\.0\.0\.1|\[::1\]/i.test(candidate)) return null;
+  return candidate.replace(/\/+$/, '');
+}
+
+let signingKey: Buffer | null = null;
+function getSigningKey(): Buffer {
+  if (signingKey) return signingKey;
+  try {
+    const existing = Buffer.from(fs.readFileSync(MEDIA_SIGNING_FILE, 'utf8').trim(), 'hex');
+    if (existing.length === 32) {
+      signingKey = existing;
+      return signingKey;
+    }
+  } catch {}
+  signingKey = crypto.randomBytes(32);
+  fs.mkdirSync(STORE_DIR, { recursive: true });
+  fs.writeFileSync(MEDIA_SIGNING_FILE, signingKey.toString('hex'), { mode: 0o600 });
+  return signingKey;
+}
+
+interface MediaTokenPayload {
+  k: MediaRef['kind'];
+  d?: string;
+  n?: string;
+  r?: string;
+  e: number;
+}
+
+function publicMediaToken(ref: MediaRef): string {
+  const payload: MediaTokenPayload = { k: ref.kind, d: ref.date, n: ref.path, r: ref.rootId, e: Date.now() + PUBLIC_MEDIA_TTL_MS };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', getSigningKey()).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function readPublicMediaToken(token: string): { ok: true; ref: MediaRef } | { ok: false; error: string } {
+  const dot = token.lastIndexOf('.');
+  if (dot < 1) return { ok: false, error: 'That media link is not valid.' };
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', getSigningKey()).update(body).digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, error: 'That media link failed its signature check.' };
+  let payload: MediaTokenPayload;
+  try {
+    payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+  } catch {
+    return { ok: false, error: 'That media link is not valid.' };
+  }
+  if (!payload.e || payload.e < Date.now()) return { ok: false, error: 'That media link has expired.' };
+  return { ok: true, ref: { kind: payload.k, name: payload.n || 'media', type: '', size: 0, date: payload.d, path: payload.n, rootId: payload.r } };
+}
+
+// Resolves what the browser stored into a file the backend can actually serve.
+function resolveMediaRef(item: any): MediaRef {
+  const name = typeof item?.name === 'string' ? item.name : 'media';
+  const type = typeof item?.type === 'string' ? item.type : '';
+  const size = Number(item?.size) || 0;
+  const url = typeof item?.url === 'string' ? item.url : '';
+
+  const fromFields = (date: unknown, fileName: unknown) => {
+    if (!safeFolder(date) || typeof fileName !== 'string') return null;
+    const safe = safeFileName(fileName);
+    if (!safe) return null;
+    const abs = resolveInMediaDir(date as string, safe);
+    return abs && fs.existsSync(abs) ? { date: date as string, path: safe, abs } : null;
+  };
+
+  const direct = fromFields(item?.folderDate, name);
+  const fromUrl = /^\/api\/storage\/media\/file\?/.test(url) ? new URL(url, 'http://local') : null;
+  const viaUrl = fromUrl?.searchParams ? fromFields(fromUrl.searchParams.get('date'), fromUrl.searchParams.get('name')) : null;
+  const hit = direct || viaUrl;
+  if (hit) {
+    return {
+      kind: 'media',
+      name,
+      type: type || MEDIA_MIME[path.extname(hit.abs).toLowerCase()] || 'application/octet-stream',
+      size: size || fs.statSync(hit.abs).size,
+      date: hit.date,
+      path: hit.path,
+    };
+  }
+
+  const libraryRel = typeof item?.libraryPath === 'string' ? item.libraryPath : null;
+  let rootId = typeof item?.libraryRootId === 'string' ? item.libraryRootId : '';
+  if (!rootId && typeof item?.id === 'string') rootId = /^library:([^/]+)\//.exec(item.id)?.[1] || '';
+  const libUrl = /^\/api\/library\/file\?/.test(url) ? new URL(url, 'http://local') : null;
+  if (!rootId && libUrl) rootId = libUrl.searchParams.get('root') || '';
+  const relPath = libraryRel || (libUrl ? libUrl.searchParams.get('path') : null);
+  if (rootId && relPath) {
+    const root = rootById(rootId);
+    if (root) {
+      const abs = resolveInRoot(root, relPath);
+      if (abs && fs.existsSync(abs)) {
+        return {
+          kind: 'library',
+          name,
+          type: type || libraryMime(path.basename(relPath)) || 'application/octet-stream',
+          size: size || fs.statSync(abs).size,
+          rootId: root.id,
+          path: relPath,
+        };
+      }
+    }
+  }
+
+  if (/^https:\/\//i.test(url)) return { kind: 'remote', name, type, size, url };
+  return { kind: 'missing', name, type, size };
+}
+
+function postMediaRefs(post: ServerPost): MediaRef[] {
+  return (post.media || []).map(resolveMediaRef);
+}
+
+function publicUrlForRef(ref: MediaRef): { url?: string; error?: string } {
+  if (ref.kind === 'remote') return { url: ref.url };
+  if (ref.kind === 'missing') return { error: `"${ref.name}" is not in shared media storage, so the platform cannot download it.` };
+  if (ref.kind !== 'media' && ref.kind !== 'library') return { error: `"${ref.name}" cannot be served publicly.` };
+  const base = publicBaseUrl();
+  if (!base) {
+    return {
+      error:
+        'No public web address is configured. Instagram and Threads download the file themselves, so set PUBLIC_MEDIA_BASE_URL (or a non-localhost APP_URL) to your tunnel or domain.',
+    };
+  }
+  return { url: `${base}/api/public-media/${publicMediaToken(ref)}` };
+}
+
+function absForRef(ref: MediaRef): string | null {
+  if (ref.kind === 'media' && ref.date && ref.path) return resolveInMediaDir(ref.date, ref.path);
+  if (ref.kind === 'library' && ref.rootId && ref.path) {
+    const root = rootById(ref.rootId);
+    return root ? resolveInRoot(root, ref.path) : null;
+  }
+  return null;
+}
+
+function servePublicMedia(req: express.Request, res: express.Response) {
+  const parsed = readPublicMediaToken(String(req.params.token || ''));
+  if (!parsed.ok) return res.status(403).json({ error: parsed.error });
+  const ref = parsed.ref;
+  const abs = absForRef(ref);
+  if (!abs) return res.status(400).json({ error: 'That media link is not valid.' });
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That file could not be found.' });
+  }
+  if (!st.isFile()) return res.status(404).json({ error: 'That file could not be found.' });
+  const mime =
+    MEDIA_MIME[path.extname(abs).toLowerCase()] ||
+    libraryMime(path.basename(abs)) ||
+    'application/octet-stream';
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(path.basename(abs))}"`);
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  streamFileWithRange(req, res, abs, mime, st);
+}
+
+app.get('/api/public-media/:token', servePublicMedia);
+app.head('/api/public-media/:token', servePublicMedia);
+
+// Meta fetches the media URL with curl; check that path before the API call so
+// a dead tunnel reads as "not reachable" instead of an opaque publish failure.
+async function probePublicMediaUrl(url: string): Promise<{ ok: boolean; status?: number; error?: string }> {
+  try {
+    const res = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-0', 'User-Agent': 'relate-social-preflight/1.0' }, redirect: 'follow' });
+    if (res.status === 200 || res.status === 206) {
+      await res.body?.cancel?.();
+      return { ok: true, status: res.status };
+    }
+    await res.body?.cancel?.();
+    return {
+      ok: false,
+      status: res.status,
+      error:
+        res.status === 530
+          ? `your public address is not reachable right now (Cloudflare error ${res.status}: the tunnel is down — restart it and retry)`
+          : `your public address returned HTTP ${res.status}`,
+    };
+  } catch (err: any) {
+    return { ok: false, error: `your public address could not be reached (${err?.message || 'network error'})` };
+  }
+}
+
+async function readyPublicUrls(refs: MediaRef[]): Promise<string[]> {
+  const base = publicBaseUrl();
+  const urls: string[] = [];
+  const problems: string[] = [];
+  for (const ref of refs) {
+    const { url, error } = publicUrlForRef(ref);
+    if (!url) {
+      problems.push(error || `"${ref.name}" has no public URL.`);
+      continue;
+    }
+    if (base && url.startsWith(base)) {
+      const probe = await probePublicMediaUrl(url);
+      if (!probe.ok) {
+        problems.push(`"${ref.name}" cannot be downloaded by the platform: ${probe.error}`);
+        logPublish('media-probe-failed', { host: base, file: ref.name, status: probe.status, error: probe.error });
+        continue;
+      }
+    }
+    urls.push(url);
+  }
+  if (problems.length) throw new Error(problems.join(' '));
+  return urls;
+}
+
+// ---------- Publishing: caption assembly ----------
+
+function buildCaption(post: ServerPost, platform: PlatformKey): string {
+  const override = post.platformOverrides?.[platform];
+  const caption = typeof override?.caption === 'string' ? override.caption : post.baseCaption;
+  const tags: string[] = Array.isArray(override?.hashtags) ? override.hashtags : post.baseHashtags || [];
+  const cleanedTags = tags.filter((t) => typeof t === 'string' && t.trim().length > 1);
+  const body = (caption || '').trim();
+  const text = body && cleanedTags.length ? `${body}\n\n${cleanedTags.join(' ')}` : body || cleanedTags.join(' ');
+  const limit = PLATFORM_CHAR_LIMITS[platform];
+  if (text.length > limit) {
+    throw new Error(`${PLATFORM_NAMES[platform]} allows ${limit} characters; this caption is ${text.length}. Shorten the caption or hashtags.`);
+  }
+  return text;
+}
+
+// ---------- Publishing: Graph API helpers ----------
+
+async function graphPostForm(url: string, params: Record<string, string>, scope = 'graph'): Promise<any> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params),
+  });
+  const json: any = await res.json().catch(() => ({}));
+  if (json.error) {
+    const e = json.error;
+    const detail = [
+      e.code ? `code ${e.code}` : '',
+      e.error_subcode ? `subcode ${e.error_subcode}` : '',
+      e.error_data && Object.keys(e.error_data).length ? `data ${JSON.stringify(e.error_data)}` : '',
+      e.fbtrace_id ? `trace ${e.fbtrace_id}` : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+    logPublish('provider-error', {
+      scope,
+      endpoint: url.replace(/\d{8,}/g, ':id'),
+      httpStatus: res.status,
+      error: e.message,
+      detail,
+    });
+    throw new Error(`${e.message || 'The platform rejected the request.'}${detail ? ` (${detail})` : ''}`);
+  }
+  return json;
+}
+
+async function graphDelete(url: string): Promise<any> {
+  const res = await fetch(url, { method: 'DELETE' });
+  const json: any = await res.json().catch(() => ({}));
+  if (json.error) throw new Error(json.error?.message || 'The platform could not delete this post.');
+  return json;
+}
+
+async function graphRead(url: string): Promise<any> {
+  const res = await fetch(url);
+  const json: any = await res.json().catch(() => ({}));
+  if (json.error) throw new Error(json.error?.message || 'The platform did not answer this request.');
+  return json;
+}
+
+// Permalinks are often not readable in the first seconds after publishing.
+async function readPermalink(url: string, attempts = 4): Promise<string | undefined> {
+  let lastError: string | undefined;
+  let returnedFields: string | undefined;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const json = await graphRead(url);
+      if (json.permalink) return json.permalink;
+      returnedFields = Object.keys(json).join(',') || '(empty)';
+    } catch (err: any) {
+      lastError = err?.message || String(err);
+    }
+    if (i < attempts - 1) await sleep(2500);
+  }
+  logPublish('permalink-unavailable', {
+    endpoint: url.split('?')[0].replace(/\d{8,}/g, ':id'),
+    error: lastError,
+    returnedFields,
+  });
+  return undefined;
+}
+
+async function instagramTokenFor(conn: StoredConnection): Promise<string> {
+  if (!needsRefresh(conn)) return conn.accessToken;
+  const res = await fetch(
+    `https://graph.instagram.com/access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(conn.accessToken)}`,
+  );
+  const next: any = await res.json();
+  if (next.error || next.error_message || !next.access_token) {
+    logDetail('Instagram token refresh failed', next.error_message || next.error?.message);
+    throw new Error('We could not renew your Instagram session. Reconnect Instagram to continue.');
+  }
+  conn.accessToken = next.access_token;
+  conn.expiresAt = Date.now() + (next.expires_in ? next.expires_in * 1000 : 3600 * 1000);
+  const store = loadStore();
+  store.instagramAccounts = { ...(store.instagramAccounts || {}), [conn.accountIds[0]]: conn };
+  if (!store.instagram || store.activeInstagramId === conn.accountIds[0]) store.instagram = conn;
+  saveStore(store);
+  return conn.accessToken;
+}
+
+interface InstagramTarget {
+  igUserId: string;
+  token: string;
+  accountName: string;
+  via: string;
+}
+
+async function resolveInstagramTarget(post: ServerPost): Promise<InstagramTarget> {
+  const store = loadStore();
+  const wanted = post.platformAccounts?.instagram;
+  const accounts = store.instagramAccounts || {};
+  const conn =
+    (wanted && accounts[wanted]) ||
+    (store.activeInstagramId && accounts[store.activeInstagramId]) ||
+    store.instagram;
+  if (conn?.accountIds?.[0]) {
+    return {
+      igUserId: conn.accountIds[0],
+      token: await instagramTokenFor(conn),
+      accountName: conn.accountNames[0] || conn.accountIds[0],
+      via: 'Instagram Login',
+    };
+  }
+  if (store.meta?.metaPages?.length) {
+    const page = store.meta.metaPages.find((p) => p.instagramId && (!wanted || p.instagramId === wanted));
+    if (page) {
+      return {
+        igUserId: page.instagramId!,
+        token: page.accessToken,
+        accountName: page.instagramUsername ? `@${page.instagramUsername}` : page.name,
+        via: `Instagram via Page "${page.name}"`,
+      };
+    }
+  }
+  throw new Error('Instagram is not connected on this machine yet. Connect it in Platform API settings first.');
+}
+
+async function waitInstagramContainer(containerId: string, token: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let status = '';
+  while (Date.now() < deadline) {
+    const info = await graphRead(
+      `https://graph.instagram.com/${GRAPH_VERSION}/${containerId}?fields=status_code,error_message&access_token=${encodeURIComponent(token)}`,
+    );
+    status = info.status_code || '';
+    if (status === 'FINISHED') return;
+    if (status === 'ERROR') throw new Error(info.error_message || 'Instagram could not process this media.');
+    await sleep(3000);
+  }
+  throw new Error(`Instagram was still processing this media after ${Math.round(timeoutMs / 1000)}s (status: ${status || 'unknown'}).`);
+}
+
+async function publishInstagram(post: ServerPost): Promise<PlatformResult> {
+  const started = Date.now();
+  const target = await resolveInstagramTarget(post);
+  const override = post.platformOverrides?.instagram;
+  const format = override?.format || post.format;
+  const caption = buildCaption(post, 'instagram');
+  const refs = postMediaRefs(post);
+  if (!refs.length) throw new Error('This post has no media attached, so there is nothing to publish to Instagram.');
+  const urls = await readyPublicUrls(refs);
+
+  const media = async (params: Record<string, string>, timeoutMs: number) => {
+    const created = await graphPostForm(`https://graph.instagram.com/${GRAPH_VERSION}/${target.igUserId}/media`, {
+      access_token: target.token,
+      ...params,
+    }, 'instagram/create-container');
+    if (!created.id) throw new Error('Instagram did not return a media container id.');
+    await waitInstagramContainer(created.id, target.token, timeoutMs);
+    return created.id as string;
+  };
+
+  const imageTimeout = 90_000;
+  const videoTimeout = Number(process.env.PUBLISH_VIDEO_TIMEOUT_MS || 300_000);
+  let containerId: string;
+
+  if (format === 'carousel') {
+    if (urls.length < 2) throw new Error('An Instagram carousel needs at least 2 files; this post has one.');
+    if (urls.length > 10) throw new Error(`An Instagram carousel holds at most 10 files; this post has ${urls.length}.`);
+    const children: string[] = [];
+    for (let i = 0; i < refs.length; i++) {
+      const isVideo = refs[i].type.startsWith('video/');
+      children.push(
+        await media(
+          {
+            is_carousel_item: 'true',
+            ...(isVideo ? { media_type: 'VIDEO', video_url: urls[i] } : { media_type: 'IMAGE', image_url: urls[i] }),
+          },
+          isVideo ? videoTimeout : imageTimeout,
+        ),
+      );
+      logPublish('carousel-child-ready', { postId: post.id, platform: 'instagram', containerId: children[children.length - 1], index: i });
+    }
+    containerId = await media({ media_type: 'CAROUSEL', caption, children: children.join(',') }, imageTimeout);
+  } else if (format === 'video') {
+    const videoRef = refs.find((r) => r.type.startsWith('video/'));
+    if (!videoRef) throw new Error('This post is set to Reel but none of the attached files is a video.');
+    const index = refs.indexOf(videoRef);
+    containerId = await media({ media_type: 'REELS', caption, video_url: urls[index] }, videoTimeout);
+  } else {
+    const imageRef = refs.find((r) => !r.type.startsWith('video/'));
+    if (!imageRef) throw new Error('This post is set to Feed Post but none of the attached files is an image. Switch the Instagram format to Reel or Carousel.');
+    const index = refs.indexOf(imageRef);
+    containerId = await media({ media_type: 'IMAGE', caption, image_url: urls[index] }, imageTimeout);
+  }
+
+  logPublish('container-finished', { postId: post.id, platform: 'instagram', containerId });
+  const published = await graphPostForm(`https://graph.instagram.com/${GRAPH_VERSION}/${target.igUserId}/media_publish`, {
+    creation_id: containerId,
+    access_token: target.token,
+  }, 'instagram/media_publish');
+  if (!published.id) throw new Error('Instagram accepted the publish call but returned no media id.');
+
+  const permalink = await readPermalink(
+    `https://graph.instagram.com/${GRAPH_VERSION}/${published.id}?fields=permalink&access_token=${encodeURIComponent(target.token)}`,
+  );
+  return {
+    status: 'success',
+    attemptedAt: new Date().toISOString(),
+    platformPostId: published.id,
+    containerId,
+    permalink,
+    profileUrl: target.accountName ? `https://www.instagram.com/${target.accountName.replace(/^@/, '')}` : undefined,
+    via: `${target.via} ${target.accountName}`,
+    durationMs: Date.now() - started,
+  };
+}
+
+async function deleteInstagramMedia(post: ServerPost, result: PlatformResult): Promise<void> {
+  if (!result.platformPostId) throw new Error('There is no Instagram media id recorded for this post, so it cannot be deleted through the API.');
+  const target = await resolveInstagramTarget(post);
+  if (target.via.startsWith('Instagram Login')) {
+    // Meta only supports deleting media for "Instagram API with Facebook Login".
+    throw new Error(
+      'Instagram deleted through the API only works when the account is connected via a Facebook Page. This connection uses Instagram Login, so remove the post in the Instagram app instead.',
+    );
+  }
+  const res = await graphDelete(
+    `https://graph.instagram.com/${GRAPH_VERSION}/${target.igUserId}/media?media_id=${encodeURIComponent(result.platformPostId)}&access_token=${encodeURIComponent(target.token)}`,
+  );
+  if (res.success !== true) throw new Error('Instagram reported the delete request but did not confirm removal.');
+}
+
+async function waitThreadsContainer(containerId: string, token: string, timeoutMs: number): Promise<void> {
+  // The status field is not documented for every container type; if the API
+  // rejects the read we let the publish call decide instead of failing early.
+  const deadline = Date.now() + timeoutMs;
+  let last = '';
+  let supported = true;
+  while (Date.now() < deadline) {
+    let info: any;
+    try {
+      info = await graphRead(
+        `https://graph.threads.net/v1.0/${containerId}?fields=status,error_message&access_token=${encodeURIComponent(token)}`,
+      );
+    } catch (err: any) {
+      if (/nonexisting field|unsupported get request/i.test(err?.message || '')) {
+        supported = false;
+        logDetail('Threads container status unavailable', err);
+        return;
+      }
+      throw err;
+    }
+    last = String(info.status || '').toUpperCase();
+    if (last === 'FINISHED' || last === 'PUBLISHED' || !last) return;
+    if (last === 'ERROR' || last === 'EXPIRED') {
+      throw new Error(info.error_message || `Threads could not process this media (${last.toLowerCase()}).`);
+    }
+    await sleep(2500);
+  }
+  if (supported) {
+    throw new Error(`Threads was still processing this media after ${Math.round(timeoutMs / 1000)}s (status: ${last || 'unknown'}).`);
+  }
+}
+
+async function publishThreads(post: ServerPost): Promise<PlatformResult> {
+  const started = Date.now();
+  const store = loadStore();
+  const conn = store.threads;
+  if (!conn?.accountIds?.[0]) throw new Error('Threads is not connected on this machine yet. Connect it in Platform API settings first.');
+  const token = await freshAccessToken('threads');
+  const userId = conn.accountIds[0];
+  const override = post.platformOverrides?.threads;
+  const format = override?.format || post.format;
+  const text = buildCaption(post, 'threads');
+  const refs = postMediaRefs(post);
+  const urls = await readyPublicUrls(refs);
+  const containerBase = `https://graph.threads.net/v1.0/${userId}/threads`;
+  const videoTimeout = Number(process.env.PUBLISH_VIDEO_TIMEOUT_MS || 300_000);
+
+  const createContainer = async (params: Record<string, string>, scope: string, timeoutMs: number) => {
+    const created = await graphPostForm(containerBase, { access_token: token, ...params }, scope);
+    if (!created.id) throw new Error('Threads did not return a container id.');
+    await waitThreadsContainer(created.id, token, timeoutMs);
+    return created.id as string;
+  };
+
+  let containerId: string;
+  if (format === 'carousel') {
+    if (urls.length < 2) throw new Error('A Threads carousel needs at least 2 files.');
+    if (refs.length > 20) throw new Error(`A Threads carousel holds at most 20 files; this post has ${refs.length}.`);
+    const children: string[] = [];
+    for (let i = 0; i < refs.length; i++) {
+      const isVideo = refs[i].type.startsWith('video/');
+      children.push(
+        await createContainer(
+          {
+            is_carousel_item: 'true',
+            media_type: isVideo ? 'VIDEO' : 'IMAGE',
+            ...(isVideo ? { video_url: urls[i] } : { image_url: urls[i] }),
+          },
+          'threads/create-child',
+          isVideo ? videoTimeout : 90_000,
+        ),
+      );
+    }
+    containerId = await createContainer({ media_type: 'CAROUSEL', children: children.join(','), text }, 'threads/create-carousel', 90_000);
+  } else if (format === 'video') {
+    const videoRef = refs.find((r) => r.type.startsWith('video/'));
+    if (!videoRef) throw new Error('This post is set to Video Thread but no video file is attached.');
+    containerId = await createContainer(
+      { media_type: 'VIDEO', video_url: urls[refs.indexOf(videoRef)], text },
+      'threads/create-video',
+      videoTimeout,
+    );
+  } else {
+    const imageRef = refs.find((r) => !r.type.startsWith('video/'));
+    if (!imageRef) throw new Error('This post is set to Photo Thread but no image file is attached.');
+    containerId = await createContainer({ media_type: 'IMAGE', image_url: urls[refs.indexOf(imageRef)], text }, 'threads/create-image', 90_000);
+  }
+
+  // A container is invisible until it is published.
+  const published = await graphPostForm(`${containerBase}_publish`, { access_token: token, creation_id: containerId }, 'threads/publish');
+  if (!published.id) throw new Error('Threads accepted the publish call but returned no thread id.');
+
+  const permalink = await readPermalink(
+    `https://graph.threads.net/v1.0/${published.id}?fields=permalink&access_token=${encodeURIComponent(token)}`,
+    2,
+  );
+  const handle = (conn.accountNames[0] || '').replace(/^@/, '');
+  return {
+    status: 'success',
+    attemptedAt: new Date().toISOString(),
+    platformPostId: published.id,
+    containerId,
+    permalink,
+    profileUrl: handle ? `https://www.threads.net/@${handle}` : undefined,
+    via: `Threads ${conn.accountNames[0] || userId}`,
+    durationMs: Date.now() - started,
+  };
+}
+
+async function deleteThreadsPost(result: PlatformResult): Promise<void> {
+  const store = loadStore();
+  const conn = store.threads;
+  if (!conn?.accountIds?.[0]) throw new Error('Threads is not connected on this machine anymore.');
+  if (!result.platformPostId) throw new Error('There is no Threads post id recorded for this post.');
+  if (!conn.scopes?.includes('threads_delete')) {
+    throw new Error('Deleting a thread needs the threads_delete permission, which this connection does not have yet. Reconnect Threads in API Connections (and enable the permission on the Meta app if asked), then retry.');
+  }
+  const token = await freshAccessToken('threads');
+  // Threads deletes on the media node itself, not under the user id.
+  await graphDelete(`https://graph.threads.net/v1.0/${encodeURIComponent(result.platformPostId)}?access_token=${encodeURIComponent(token)}`);
+}
+
+// ---------- Publishing: orchestration ----------
+
+const SUPPORTED_PUBLISH: PlatformKey[] = ['instagram', 'threads'];
+const inFlight = new Set<string>();
+
+async function publishOnePlatform(post: ServerPost, platform: PlatformKey): Promise<PlatformResult> {
+  if (!SUPPORTED_PUBLISH.includes(platform)) {
+    return {
+      status: 'skipped',
+      attemptedAt: new Date().toISOString(),
+      error: `Publishing to ${PLATFORM_NAMES[platform]} is not implemented in this build, so nothing was sent there.`,
+    };
+  }
+  try {
+    return platform === 'instagram' ? await publishInstagram(post) : await publishThreads(post);
+  } catch (err: any) {
+    const message = err?.message ? String(err.message) : 'unknown error';
+    logDetail(`publish to ${platform} failed`, message);
+    return { status: 'failed', attemptedAt: new Date().toISOString(), error: message };
+  }
+}
+
+function finalizeStatus(post: ServerPost): ServerPost {
+  const results = post.results || {};
+  const attempted = post.platforms.filter((p) => results[p]);
+  const succeeded = attempted.filter((p) => results[p].status === 'success');
+  const skipped = attempted.filter((p) => results[p].status === 'skipped');
+  const failed = attempted.filter((p) => results[p].status === 'failed');
+  const sentSomewhere = succeeded.length > 0;
+
+  if (failed.length === 0 && succeeded.length === post.platforms.length) {
+    post.status = 'published';
+    post.publishedAt = post.publishedAt || new Date().toISOString();
+    post.lastError = undefined;
+    post.nextTryAt = undefined;
+  } else if (sentSomewhere && failed.length) {
+    post.status = 'partial';
+    post.lastError = failed.map((p) => `${PLATFORM_NAMES[p]}: ${results[p].error}`).join(' | ');
+  } else if (failed.length) {
+    post.status = 'failed';
+    post.lastError = failed.map((p) => `${PLATFORM_NAMES[p]}: ${results[p].error}`).join(' | ');
+  } else {
+    post.status = skipped.length === post.platforms.length ? 'failed' : 'partial';
+    post.lastError = skipped.map((p) => `${PLATFORM_NAMES[p]}: ${results[p].error || 'not sent'}`).join(' | ');
+  }
+  return post;
+}
+
+async function publishPost(postId: string, trigger: 'manual' | 'scheduler' | 'retry'): Promise<ServerPost | null> {
+  if (inFlight.has(postId)) {
+    logPublish('publish-skipped-busy', { postId, trigger });
+    return getStoredPost(postId) || null;
+  }
+  const initial = getStoredPost(postId);
+  if (!initial) return null;
+  inFlight.add(postId);
+
+  let post: ServerPost = { ...initial, status: 'publishing', startedAt: new Date().toISOString(), attempts: (initial.attempts || 0) + 1, updatedAt: new Date().toISOString() };
+  upsertStoredPost(post);
+  logPublish('publish-start', { postId, trigger, platforms: post.platforms, attempt: post.attempts, format: post.format, files: postMediaRefs(post).map((r) => `${r.kind}:${r.name}`) });
+
+  const results: Record<string, PlatformResult> = { ...(post.results || {}) };
+  try {
+    for (const platform of post.platforms) {
+      if (results[platform]?.status === 'success') {
+        logPublish('platform-already-published', { postId, platform, platformPostId: results[platform].platformPostId });
+        continue;
+      }
+      const current = getStoredPost(postId)!;
+      current.results = results;
+      const result = await publishOnePlatform(current, platform);
+      results[platform] = result;
+      post = { ...post, results: { ...results } };
+      upsertStoredPost(post);
+      logPublish(result.status === 'success' ? 'platform-success' : 'platform-failed', {
+        postId,
+        platform,
+        status: result.status,
+        platformPostId: result.platformPostId,
+        permalink: result.permalink,
+        via: result.via,
+        durationMs: result.durationMs,
+        error: result.error,
+      });
+    }
+  } finally {
+    inFlight.delete(postId);
+  }
+
+  post = finalizeStatus({ ...post, startedAt: undefined });
+  const failures = post.platforms.filter((p) => post.results?.[p]?.status === 'failed');
+  if (failures.length && post.attempts < 3 && (post.status === 'failed' || post.status === 'partial')) {
+    post.nextTryAt = new Date(Date.now() + RETRY_BACKOFF_MS[Math.min(post.attempts - 1, RETRY_BACKOFF_MS.length - 1)]).toISOString();
+  } else {
+    post.nextTryAt = undefined;
+  }
+  upsertStoredPost(post);
+  logPublish('publish-finish', { postId, status: post.status, attempts: post.attempts, nextTryAt: post.nextTryAt, error: post.lastError });
+  return post;
+}
+
+async function removeFromPlatforms(postId: string): Promise<ServerPost> {
+  const post = getStoredPost(postId);
+  if (!post) throw new Error('That post is no longer in the schedule.');
+  const results = { ...(post.results || {}) };
+  const problems: string[] = [];
+  for (const platform of post.platforms) {
+    const result = results[platform];
+    if (!result || result.status !== 'success' || !result.platformPostId) continue;
+    try {
+      if (platform === 'instagram') await deleteInstagramMedia(post, result);
+      else if (platform === 'threads') await deleteThreadsPost(result);
+      else throw new Error(`${PLATFORM_NAMES[platform]} cannot be deleted through this app.`);
+      results[platform] = { ...result, deletedAt: new Date().toISOString(), status: 'skipped', error: 'Removed from the platform.', permalink: undefined };
+      logPublish('platform-deleted', { postId, platform, platformPostId: result.platformPostId });
+    } catch (err: any) {
+      problems.push(`${PLATFORM_NAMES[platform]}: ${err?.message || 'delete failed'}`);
+      logPublish('platform-delete-failed', { postId, platform, error: err?.message });
+    }
+  }
+  const next: ServerPost = {
+    ...post,
+    results,
+    status: problems.length ? post.status : 'draft',
+    deletedAt: problems.length ? post.deletedAt : new Date().toISOString(),
+    lastError: problems.length ? problems.join(' | ') : undefined,
+    nextTryAt: undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  return upsertStoredPost(next);
+}
+
+// ---------- Scheduler ----------
+
+const SCHEDULE_TICK_MS = Number(process.env.SCHEDULE_TICK_SECONDS || 20) * 1000;
+const SCHEDULE_GRACE_MS = Number(process.env.SCHEDULE_GRACE_MINUTES || 120) * 60_000;
+const PUBLISH_MAX_ATTEMPTS = Number(process.env.PUBLISH_MAX_ATTEMPTS || 3);
+const STALE_PUBLISHING_MS = 10 * 60_000;
+let schedulerTimer: NodeJS.Timeout | null = null;
+let schedulerRunning = false;
+
+function duePosts(now: number): { post: ServerPost; lateMs: number }[] {
+  const out: { post: ServerPost; lateMs: number }[] = [];
+  for (const post of loadPosts()) {
+    if (post.status === 'draft') continue;
+    const dueAt = Date.parse(post.publishAt);
+    if (Number.isNaN(dueAt)) continue;
+    const lateMs = now - dueAt;
+    if (post.status === 'publishing') {
+      const startedAt = Date.parse(post.startedAt || '');
+      if (Number.isNaN(startedAt) || now - startedAt > STALE_PUBLISHING_MS) out.push({ post, lateMs });
+      continue;
+    }
+    if (post.status === 'scheduled') {
+      if (lateMs >= 0) out.push({ post, lateMs });
+      continue;
+    }
+    if ((post.status === 'failed' || post.status === 'partial') && post.nextTryAt && now >= Date.parse(post.nextTryAt) && post.attempts < PUBLISH_MAX_ATTEMPTS) {
+      out.push({ post, lateMs });
+    }
+  }
+  return out;
+}
+
+async function schedulerTick(): Promise<void> {
+  if (schedulerRunning) return;
+  schedulerRunning = true;
+  const now = Date.now();
+  try {
+    for (const { post, lateMs } of duePosts(now)) {
+      if (inFlight.has(post.id)) continue;
+      if (post.status === 'scheduled' && lateMs > SCHEDULE_GRACE_MS) {
+        const lateMinutes = Math.round(lateMs / 60_000);
+        upsertStoredPost({
+          ...post,
+          status: 'failed',
+          lastError: `Scheduled window passed — the app was offline ${lateMinutes} minutes past ${post.scheduledTime}, so publishing was skipped. Press Publish to send it now.`,
+          nextTryAt: undefined,
+          updatedAt: new Date().toISOString(),
+        });
+        logPublish('missed-window', { postId: post.id, lateMs, graceMs: SCHEDULE_GRACE_MS });
+        continue;
+      }
+      await publishPost(post.id, post.attempts > 0 ? 'retry' : 'scheduler');
+    }
+  } catch (err) {
+    logDetail('scheduler tick failed', err);
+    logPublish('scheduler-error', { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
+function startScheduler() {
+  if (schedulerTimer) return;
+  schedulerTimer = setInterval(() => void schedulerTick(), SCHEDULE_TICK_MS);
+  setTimeout(() => void schedulerTick(), 4000);
+  logPublish('scheduler-start', {
+    tickSeconds: SCHEDULE_TICK_MS / 1000,
+    graceMinutes: SCHEDULE_GRACE_MS / 60_000,
+    maxAttempts: PUBLISH_MAX_ATTEMPTS,
+    timezone: localZone(),
+    supported: SUPPORTED_PUBLISH,
+  });
+}
+
+// ---------- Publishing API ----------
+
+function sanitizeIncomingPost(body: any, existing?: ServerPost): { post?: ServerPost; error?: string } {
+  const id = typeof body?.id === 'string' ? body.id.slice(0, 64) : '';
+  if (!/^[A-Za-z0-9_.:-]{4,64}$/.test(id)) return { error: 'That post id is not valid.' };
+  if (!Array.isArray(body?.platforms) || !body.platforms.length) return { error: 'Choose at least one channel.' };
+  const platforms = body.platforms.filter((p: string): p is PlatformKey => PUBLISH_PLATFORMS.includes(p as PlatformKey));
+  if (!platforms.length) return { error: 'None of the selected channels is supported.' };
+
+  const publishAt = computePublishAt(body?.scheduledDate, body?.scheduledTime);
+  if (!publishAt) return { error: 'Scheduled date and time must read as YYYY-MM-DD and HH:mm.' };
+
+  const media = (Array.isArray(body?.media) ? body.media : []).slice(0, 20).map((item: any) => ({
+    id: typeof item?.id === 'string' ? item.id.slice(0, 300) : '',
+    name: typeof item?.name === 'string' ? item.name.slice(0, 200) : 'media',
+    type: typeof item?.type === 'string' ? item.type : '',
+    size: Number(item?.size) || 0,
+    url: typeof item?.url === 'string' && item.url.length < 4000 ? item.url : '',
+    folderDate: safeFolder(item?.folderDate) || undefined,
+    libraryPath: typeof item?.libraryPath === 'string' ? item.libraryPath.slice(0, 500) : undefined,
+    libraryRoot: typeof item?.libraryRoot === 'string' ? item.libraryRoot.slice(0, 200) : undefined,
+    libraryRootId: typeof item?.libraryRootId === 'string' ? item.libraryRootId.slice(0, 80) : undefined,
+    duration: Number(item?.duration) || undefined,
+  }));
+
+  const status = body?.status === 'draft' ? 'draft' : 'scheduled';
+  const now = new Date().toISOString();
+  const post: ServerPost = {
+    id,
+    title: typeof body?.title === 'string' ? body.title.slice(0, 200) : 'Untitled Social Campaign',
+    campaignName: typeof body?.campaignName === 'string' ? body.campaignName.slice(0, 200) : undefined,
+    scheduledDate: String(body.scheduledDate),
+    scheduledTime: String(body.scheduledTime),
+    platforms,
+    format: ['image', 'video', 'carousel'].includes(body?.format) ? body.format : 'image',
+    media,
+    baseCaption: typeof body?.baseCaption === 'string' ? body.baseCaption.slice(0, 20000) : '',
+    baseHashtags: (Array.isArray(body?.baseHashtags) ? body.baseHashtags : []).filter((t: any) => typeof t === 'string').map((t: string) => t.slice(0, 100)),
+    platformOverrides: body?.platformOverrides && typeof body.platformOverrides === 'object' ? body.platformOverrides : {},
+    platformAccounts: body?.platformAccounts && typeof body.platformAccounts === 'object' ? body.platformAccounts : existing?.platformAccounts,
+    status,
+    createdAt: existing?.createdAt || (typeof body?.createdAt === 'string' ? body.createdAt : now),
+    updatedAt: now,
+    publishAt,
+    timezone: localZone(),
+    results: existing?.results,
+    // An edit means the human took control: clear the retry timer, and give a
+    // previously failed post its full attempt budget back.
+    attempts: existing && ['failed', 'partial'].includes(existing.status) && status === 'scheduled' ? 0 : existing?.attempts || 0,
+    nextTryAt: undefined,
+    lastError: existing?.lastError,
+    publishedAt: existing?.publishedAt,
+    deletedAt: existing?.deletedAt,
+  };
+  return { post };
+}
+
+function postWithDiagnostics(post: ServerPost) {
+  const refs = postMediaRefs(post);
+  const warnings: string[] = [];
+  for (const ref of refs) {
+    if (ref.kind === 'missing') warnings.push(`"${ref.name}" is not in shared media storage — re-upload it or pick it from the media library before publishing.`);
+  }
+  if (!refs.length) warnings.push('No media attached — Instagram and Threads need at least one file.');
+  if (!publicBaseUrl()) warnings.push('No public web address configured — set PUBLIC_MEDIA_BASE_URL or APP_URL to your tunnel/domain.');
+  for (const platform of post.platforms) {
+    try {
+      buildCaption(post, platform);
+    } catch (err: any) {
+      warnings.push(err?.message || `${PLATFORM_NAMES[platform]} caption is too long.`);
+    }
+    if (!SUPPORTED_PUBLISH.includes(platform)) warnings.push(`${PLATFORM_NAMES[platform]} is scheduled but not sent by this build.`);
+  }
+  return { ...post, mediaRefs: refs.map((r) => ({ name: r.name, kind: r.kind })), warnings };
+}
+
+app.get('/api/posts', (_req, res) => {
+  const posts = loadPosts().map(postWithDiagnostics);
+  res.json({ posts, timezone: localZone(), serverTime: new Date().toISOString(), scheduler: { tickSeconds: SCHEDULE_TICK_MS / 1000, graceMinutes: SCHEDULE_GRACE_MS / 60_000, maxAttempts: PUBLISH_MAX_ATTEMPTS, supported: SUPPORTED_PUBLISH } });
+});
+
+app.get('/api/posts/:id', (req, res) => {
+  const post = getStoredPost(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
+  res.json(postWithDiagnostics(post));
+});
+
+app.put('/api/posts/:id', (req, res) => {
+  const existing = getStoredPost(req.params.id);
+  const { post, error } = sanitizeIncomingPost(req.body, existing);
+  if (!post) return res.status(400).json({ error });
+  const saved = upsertStoredPost(post);
+  logPublish(existing ? 'post-updated' : 'post-created', {
+    postId: saved.id,
+    status: saved.status,
+    publishAt: saved.publishAt,
+    platforms: saved.platforms,
+    warnings: postWithDiagnostics(saved).warnings,
+  });
+  res.json(postWithDiagnostics(saved));
+});
+
+app.post('/api/posts/sync', (req, res) => {
+  const incoming = Array.isArray(req.body?.posts) ? req.body.posts : [];
+  const known = new Set(loadPosts().map((p) => p.id));
+  const imported: ServerPost[] = [];
+  const skipped: string[] = [];
+  for (const body of incoming) {
+    const { post, error } = sanitizeIncomingPost(body, getStoredPost(body?.id));
+    if (!post) {
+      skipped.push(`${body?.id || 'unknown'}: ${error}`);
+      continue;
+    }
+    if (known.has(post.id)) continue;
+    imported.push(upsertStoredPost(post));
+  }
+  logPublish('posts-imported', { count: imported.length, skipped: skipped.length });
+  res.json({ imported: imported.map((p) => p.id), skipped, posts: loadPosts().map(postWithDiagnostics) });
+});
+
+app.delete('/api/posts/:id', (req, res) => {
+  const post = getStoredPost(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
+  const live = Object.entries(post.results || {}).filter(([, r]) => r.status === 'success' && !r.deletedAt);
+  savePosts(loadPosts().filter((p) => p.id !== post.id));
+  logPublish('post-removed', { postId: post.id, liveOnPlatforms: live.map(([p]) => p) });
+  res.json({
+    removed: post.id,
+    stillLiveOn: live.map(([platform, r]) => ({ platform, permalink: r.permalink, platformPostId: r.platformPostId })),
+    note: live.length ? 'Removing the schedule does not delete what is already live on the platforms. Use Remove from platforms first.' : undefined,
+  });
+});
+
+// Runs every pre-flight check a publish would do, without sending anything.
+async function validatePost(post: ServerPost) {
+  const checks: { label: string; ok: boolean; detail: string }[] = [];
+  const refs = postMediaRefs(post);
+
+  const missing = refs.filter((r) => r.kind === 'missing');
+  checks.push({
+    label: 'Media files',
+    ok: refs.length > 0 && missing.length === 0,
+    detail: refs.length
+      ? missing.length
+        ? `${missing.length} of ${refs.length} file(s) are not on shared storage: ${missing.map((m) => m.name).join(', ')}`
+        : `${refs.length} file(s) ready (${refs.map((r) => r.kind).join(', ')})`
+      : 'No media attached.',
+  });
+
+  const urls: string[] = [];
+  let urlCheckOk = refs.length > 0 && missing.length === 0;
+  let urlDetail = 'No media to serve.';
+  for (const ref of refs) {
+    const { url, error } = publicUrlForRef(ref);
+    if (!url) {
+      urlCheckOk = false;
+      urlDetail = error || 'No public URL.';
+      break;
+    }
+    urls.push(url);
+    if (publicBaseUrl() && url.startsWith(publicBaseUrl()!)) {
+      const probe = await probePublicMediaUrl(url);
+      if (!probe.ok) {
+        urlCheckOk = false;
+        urlDetail = `"${ref.name}" — ${probe.error}`;
+        break;
+      }
+      urlDetail = `${urls.length} file(s) downloadable by the platform through ${publicBaseUrl()}`;
+    }
+  }
+  checks.push({ label: 'Public download', ok: urlCheckOk && urls.length > 0, detail: urls.length ? urlDetail : urlDetail });
+
+  for (const platform of post.platforms) {
+    if (!SUPPORTED_PUBLISH.includes(platform)) {
+      checks.push({ label: `${PLATFORM_NAMES[platform]}`, ok: false, detail: 'Not implemented in this build; nothing will be sent.' });
+      continue;
+    }
+    try {
+      const caption = buildCaption(post, platform);
+      if (platform === 'instagram') {
+        const target = await resolveInstagramTarget(post);
+        let accountNote = '';
+        let reachable = true;
+        try {
+          const me = await graphRead(`https://graph.instagram.com/${GRAPH_VERSION}/${target.igUserId}?fields=user_type,username&access_token=${encodeURIComponent(target.token)}`);
+          accountNote = `; account type ${me.user_type || 'not returned by Meta'}`;
+          if (me.username) logPublish('instagram-account-read', { postId: post.id, username: me.username, userType: me.user_type || null });
+        } catch (err: any) {
+          reachable = false;
+          accountNote = `; /me read failed: ${err?.message || 'unknown error'}`;
+          logPublish('instagram-account-read-failed', { postId: post.id, error: err?.message });
+        }
+        checks.push({
+          label: 'Instagram',
+          ok: reachable,
+          detail: `${target.accountName} via ${target.via}${accountNote}; caption ${caption.length} characters`,
+        });
+      } else {
+        const store = loadStore();
+        if (!store.threads?.accountIds?.[0]) throw new Error('Threads is not connected on this machine.');
+        const token = await freshAccessToken('threads');
+        let accountNote = '';
+        try {
+          const me = await graphRead(`https://graph.threads.net/v1.0/${store.threads.accountIds[0]}?fields=id,username&access_token=${encodeURIComponent(token)}`);
+          accountNote = me.username ? `; read as @${me.username}` : '; /me returned no username';
+        } catch (err: any) {
+          accountNote = `; /me read failed: ${err?.message || 'unknown error'}`;
+          logPublish('threads-account-read-failed', { postId: post.id, error: err?.message });
+        }
+        checks.push({ label: 'Threads', ok: !accountNote.includes('failed'), detail: `${store.threads.accountNames[0]}${accountNote}; caption ${caption.length} characters` });
+      }
+    } catch (err: any) {
+      checks.push({ label: PLATFORM_NAMES[platform] || platform, ok: false, detail: err?.message || 'Not ready.' });
+    }
+  }
+
+  const ready = checks.every((c) => c.ok);
+  logPublish('validate', { postId: post.id, ready, failures: checks.filter((c) => !c.ok).map((c) => `${c.label}: ${c.detail}`) });
+  return { ready, checks, mediaCount: refs.length, publicBaseUrl: publicBaseUrl(), timezone: localZone(), publishAt: post.publishAt };
+}
+
+// Clears one channel's result so it can be sent again (e.g. a delivery that
+// reported success but never appeared, or a post deleted outside this app).
+app.post('/api/posts/:id/reset-platform', (req, res) => {
+  const post = getStoredPost(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
+  const platform = req.body?.platform as PlatformKey;
+  if (!post.platforms.includes(platform)) return res.status(400).json({ error: 'That channel is not part of this post.' });
+  const results = { ...(post.results || {}) };
+  delete results[platform];
+  const delivered = post.platforms.filter((p) => results[p]?.status === 'success' && !results[p]?.deletedAt);
+  const status = delivered.length === post.platforms.length ? 'published' : delivered.length ? 'partial' : 'scheduled';
+  const next = upsertStoredPost({
+    ...post,
+    results,
+    status,
+    attempts: 0,
+    nextTryAt: undefined,
+    lastError: undefined,
+    deletedAt: undefined,
+    updatedAt: new Date().toISOString(),
+  });
+  logPublish('platform-reset', { postId: post.id, platform, status });
+  res.json(postWithDiagnostics(next));
+});
+
+// Backfills permalinks for posts whose link was not readable at publish time.
+// Threads has no per-post link in its API, so it gets a profile URL instead.
+app.post('/api/posts/:id/refresh-links', async (req, res) => {
+  const post = getStoredPost(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
+  const results = { ...(post.results || {}) };
+  const updated: string[] = [];
+
+  const igResult = results.instagram;
+  if (igResult?.status === 'success' && igResult.platformPostId) {
+    try {
+      const target = await resolveInstagramTarget(post);
+      const link = await readPermalink(
+        `https://graph.instagram.com/${GRAPH_VERSION}/${igResult.platformPostId}?fields=permalink&access_token=${encodeURIComponent(target.token)}`,
+        1,
+      );
+      results.instagram = {
+        ...igResult,
+        permalink: link || igResult.permalink,
+        profileUrl: igResult.profileUrl || (target.accountName ? `https://www.instagram.com/${target.accountName.replace(/^@/, '')}` : undefined),
+      };
+      if (link) updated.push('instagram');
+    } catch (err: any) {
+      logPublish('refresh-link-failed', { postId: post.id, platform: 'instagram', error: err?.message });
+    }
+  }
+
+  const threadsResult = results.threads;
+  if (threadsResult?.status === 'success' && !threadsResult.profileUrl) {
+    const handle = (loadStore().threads?.accountNames?.[0] || '').replace(/^@/, '');
+    if (handle) results.threads = { ...threadsResult, profileUrl: `https://www.threads.net/@${handle}` };
+  }
+
+  const next = upsertStoredPost({ ...post, results, updatedAt: new Date().toISOString() });
+  logPublish('links-refreshed', { postId: post.id, updated });
+  res.json({ post: postWithDiagnostics(next), updated });
+});
+
+app.post('/api/posts/:id/validate', async (req, res) => {
+  const post = getStoredPost(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
+  try {
+    res.json(await validatePost(post));
+  } catch (err: any) {
+    res.status(502).json({ error: err?.message || 'Validation did not finish.' });
+  }
+});
+
+app.post('/api/posts/:id/publish', async (req, res) => {  const post = getStoredPost(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
+  if (inFlight.has(post.id)) return res.status(409).json({ error: 'This post is already being published. Watch its status.' });
+  const platforms = Array.isArray(req.body?.platforms)
+    ? req.body.platforms.filter((p: string): p is PlatformKey => post.platforms.includes(p as PlatformKey))
+    : post.platforms;
+  if (!platforms.length) return res.status(400).json({ error: 'Pick at least one channel to publish.' });
+
+  res.status(202).json({ started: true, postId: post.id, platforms, status: 'publishing' });
+  void publishPost(post.id, 'manual').catch((err) => logDetail('manual publish crashed', err));
+});
+
+app.post('/api/posts/:id/unpublish', async (req, res) => {
+  try {
+    const next = await removeFromPlatforms(req.params.id);
+    res.json(postWithDiagnostics(next));
+  } catch (err: any) {
+    res.status(502).json({ error: err?.message || 'The platform could not remove this post.' });
+  }
+});
+
+app.get('/api/publish/log', (req, res) => {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 80));
+  const postId = typeof req.query.postId === 'string' ? req.query.postId : undefined;
+  res.json({ entries: readPublishLog(limit, postId), file: LOG_FILE });
+});
+
+app.get('/api/publish/readiness', async (_req, res) => {
+  const base = publicBaseUrl();
+  const store = loadStore();
+  const probe = base ? await probePublicMediaUrl(`${base}/api/health`) : { ok: false, error: 'no public address configured' };
+  const accounts = Object.values(store.instagramAccounts || {});
+  res.json({
+    publicBaseUrl: base,
+    publicReachable: probe.ok,
+    publicProbeError: probe.error,
+    publicProbeStatus: probe.status,
+    timezone: localZone(),
+    serverTime: new Date().toISOString(),
+    scheduler: { tickSeconds: SCHEDULE_TICK_MS / 1000, graceMinutes: SCHEDULE_GRACE_MS / 60_000, maxAttempts: PUBLISH_MAX_ATTEMPTS, supported: SUPPORTED_PUBLISH },
+    accounts: {
+      instagram: accounts.map((a) => ({ id: a.accountIds[0], name: a.accountNames[0], expiresAt: a.expiresAt })),
+      threads: store.threads ? { id: store.threads.accountIds[0], name: store.threads.accountNames[0], expiresAt: store.threads.expiresAt } : null,
+    },
+    logFile: LOG_FILE,
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`[relate-oauth] listening on http://localhost:${PORT}`);
   console.log(`[relate-oauth] redirect base: ${APP_BASE}`);
   console.log(`[relate-oauth] media data dir: ${MEDIA_DIR}`);
+  startScheduler();
+  console.log(
+    `[relate-publish] scheduler armed for ${localZone()}, public media base: ${publicBaseUrl() || 'none (platforms cannot download media)'}`,
+  );
   void detectFfmpeg().then((tools) => {
     console.log(
       tools

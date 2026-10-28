@@ -2,7 +2,28 @@ export type PlatformId = 'instagram' | 'facebook' | 'threads' | 'tiktok' | 'yout
 
 export type MediaFormat = 'image' | 'video' | 'carousel';
 
-export type PostStatus = 'draft' | 'scheduled' | 'published';
+export type PostStatus =
+  | 'draft'
+  | 'scheduled'
+  | 'publishing'
+  | 'published'
+  | 'partial'
+  | 'failed';
+
+export type PlatformPublishStatus = 'success' | 'failed' | 'skipped';
+
+export interface PlatformPublishResult {
+  status: PlatformPublishStatus;
+  attemptedAt: string;
+  platformPostId?: string;
+  permalink?: string;
+  profileUrl?: string; // account link when the platform exposes no per-post link
+  containerId?: string;
+  error?: string;
+  via?: string; // e.g. "Instagram Login @account" or "Threads @account"
+  durationMs?: number;
+  deletedAt?: string;
+}
 
 export interface MediaItem {
   id: string;
@@ -21,6 +42,7 @@ export interface MediaItem {
   folderDate?: string; // YYYY-MM-DD folder the file lives in
   libraryPath?: string; // path relative to a scanned local library root
   libraryRoot?: string; // display name of the scanned library root
+  libraryRootId?: string; // backend root id used to resolve the file for publishing
 }
 
 export interface LibraryRoot {
@@ -71,7 +93,7 @@ export interface ScheduledPost {
   title: string;
   campaignName?: string;
   scheduledDate: string; // YYYY-MM-DD
-  scheduledTime: string; // HH:mm
+  scheduledTime: string; // HH:mm, interpreted in the backend's local timezone
   platforms: PlatformId[];
   format: MediaFormat;
   media: MediaItem[];
@@ -87,9 +109,20 @@ export interface ScheduledPost {
     shares: number;
     views?: number;
   };
+  // Delivery state, owned by the backend and mirrored into this browser.
+  publishAt?: string; // absolute ISO instant derived from scheduledDate + scheduledTime
+  timezone?: string; // IANA zone the backend used for publishAt
+  results?: Partial<Record<PlatformId, PlatformPublishResult>>;
+  attempts?: number;
+  nextTryAt?: string;
+  lastError?: string;
+  publishedAt?: string;
+  deletedAt?: string; // removed from the platforms, still listed for the manager
 }
 
 export type CalendarViewMode = 'month' | 'week' | 'day';
+
+export type StatusTab = 'all' | 'scheduled' | 'draft' | 'attention';
 
 export interface PlatformConfig {
   id: PlatformId;

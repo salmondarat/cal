@@ -5,37 +5,59 @@ the system safely, and the conventions the codebase follows.
 
 ---
 
-## 1. Publishing is a simulation
+## 1. Publishing: what is real and what is not
 
-There is no delivery path anywhere in the repository:
+Instagram and Threads publish through the platform APIs. Everything else is
+still schedule-only.
 
-- No backend route publishes content.
-- `handlePublishNow` (`src/App.tsx:203-223`) only flips `status` to `published`
-  and adds canned metrics.
-- The composer seeds new posts with random metrics.
-- The simulator's "Simulate Instant Publish" calls that handler.
+Real (backend `server.ts`, "Publishing" sections):
 
-Therefore: "Scheduled" and "Published" are **local labels**, not facts about the
-platforms. Any work that says "schedule/publish to Instagram/TikTok/YouTube"
-requires new backend capability, not just UI wiring.
+- `POST /api/posts/:id/publish` starts a delivery job and answers `202`
+  immediately; the job keeps running after the browser closes. The client polls
+  `GET /api/posts/:id` until the status leaves `publishing`.
+- Instagram (Instagram Login, or an Instagram account attached to a Facebook
+  Page): create container → poll `status_code` until `FINISHED` →
+  `media_publish` → read `permalink`. Feed image, Reel, and carousel (child
+  containers with `is_carousel_item=true`, then a `CAROUSEL` parent).
+- Threads: image thread, video container + `container_id`, carousel children.
+- `POST /api/posts/:id/unpublish` deletes what was published
+  (`DELETE /{ig-id}/media?media_id=…`, `DELETE /{threads-id}?id=…`) and keeps
+  the record with `deletedAt`.
+- `POST /api/posts/:id/validate` runs every pre-flight check — media resolves
+  on disk, the public download URL answers, the account is readable, the caption
+  fits — without sending anything. This is what the "Check" button uses.
+- Scheduler: `setInterval` tick (default 20s) plus a catch-up tick 4s after
+  boot. `publishAt` is computed from `scheduledDate` + `scheduledTime` in the
+  **backend's local timezone**; a post more than `SCHEDULE_GRACE_MINUTES` (120)
+  late is marked `failed` instead of being posted at the wrong hour. Up to
+  `PUBLISH_MAX_ATTEMPTS` (3) retries at 2/10/30 minutes, and a platform that
+  already succeeded is never re-published.
+- Audit trail: every phase is appended to `<RELATE_DATA_DIR>/logs/publish.jsonl`
+  (`publish-start`, `provider-error` with Meta's code/subcode/fbtrace_id,
+  `platform-success`, `missed-window`, …) and served by `GET /api/publish/log`.
 
-Minimum work needed:
+Still not implemented:
 
-1. A publish endpoint that loads the right token (`store.meta` page token,
-   `store.instagram`, `store.threads`, `store.tiktok`, `store.youtube`) and calls
-   the real platform API.
-2. Media accessible to the backend: server-managed files under the date folders,
-   or an upload step. Blob URLs in posts are not usable server-side.
-3. Per-platform result handling (success/partial/failure), retries, and status
-   persistence beyond `localStorage` if this leaves a single browser.
-4. Authentication in front of the publish endpoints.
-5. A scheduler/job runner if posts should publish at their scheduled time rather
-   than on demand.
+- TikTok, YouTube and Facebook-page publishing. Those platforms return
+  `status: "skipped"` with an explicit "not implemented in this build" error, so
+  a post can end `partial` — the UI never claims a silent success.
+- No authentication on `/api/*` (see §3) — anyone who can reach the port can
+  publish or delete.
+- No insights: engagement numbers were removed rather than faked.
 
-Platform API outline (verify against current provider docs before implementing):
-Meta/Instagram use a create-container → publish sequence; Threads publishes a
-threads container; TikTok initializes an upload then posts the video; YouTube uses
-`videos.insert` (resumable for large files).
+Two hard requirements for a live publish:
+
+1. **Media on shared storage.** Posts must reference `folderDate`+name in
+   `<data>/media/YYYY-MM-DD/` or a scanned library root (`libraryRootId` +
+   `libraryPath`). Blob/data URLs in `localStorage` cannot be published; the
+   composer blocks them.
+2. **A public HTTPS base URL.** Meta curls the file, so
+   `PUBLIC_MEDIA_BASE_URL` (or a non-localhost `APP_URL`) has to reach this
+   backend. Locally that means a tunnel — the app's Cloudflare tunnel serves
+   `https://<host>` → Vite :3000 → `/api` proxy → :8787. Media is served by
+   `GET /api/public-media/:token`, an HMAC-signed, 6-hour-expiry link over the
+   existing file resolvers; the publisher probes that URL first so a dead tunnel
+   reads as "not reachable (Cloudflare 530)" instead of a mystery failure.
 
 ---
 
@@ -43,30 +65,31 @@ threads container; TikTok initializes an upload then posts the video; YouTube us
 
 | # | Issue | Location | Impact | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | Uploaded media keeps a `blob:` URL in posts; server response is ignored | `src/utils/mediaStorage.ts:43-76,122-150`; composer `:172-204` | Post thumbnails/simulator media break after reload | Highest-impact data bug; see recipe §4.1 |
-| 2 | "Today" is hardcoded to 2026-10-21 | `src/App.tsx:277` | Today button jumps to a fixed date | One-line fix |
-| 3 | Library "Schedule Post" ignores the selected item | `src/App.tsx:466-472` | Opens a blank composer; chosen media not attached | Needs a prop to seed media |
-| 4 | Bulk builder hardcodes overrides for IG/TikTok/YouTube and a default start date | `src/components/BulkUpload/BulkCampaignModal.tsx:48,157-176` | Overrides exist for unselected channels; captions are canned; dates may surprise | Overrides are harmless when unselected but misleading |
+| 1 | Media uploaded while the backend is down still keeps a `blob:` URL | `src/utils/mediaStorage.ts:128-158` | Post thumbnails break after reload; such posts cannot publish | Composer now blocks publishing for non-`serverManaged` items; the load-time migration to library matches is still missing |
+| 2 | ~~"Today" was hardcoded to 2026-10-21~~ fixed | `src/App.tsx` `handleToday` | — | Now `new Date()` |
+| 3 | Library "Schedule Post" ignores the selected item | `src/App.tsx` `onSelectMediaForPost` | Opens a blank composer; chosen media not attached | Needs a prop to seed media |
+| 4 | Bulk builder hardcodes overrides for IG/TikTok/YouTube and a default start date | `src/components/BulkUpload/BulkCampaignModal.tsx:157-176` | Overrides exist for unselected channels; captions are canned; dates may surprise | Overrides are harmless when unselected but misleading |
 | 5 | Bulk format never becomes `carousel` | same file, `:153` | Multi-file batches produce separate image/video posts | One media per post by design |
-| 6 | Date handling mixes local dates and `toISOString()` | `MonthView.tsx:40,55,83`; `WeekView.tsx:47`; `DayView.tsx:29` | Cells/columns can shift by one day depending on timezone/time of day | Current-month cells are formatted manually (safe); adjacent-month and week cells are not |
-| 7 | Overrides snapshot base values at first edit | `UnifiedComposerModal.tsx:228-247` | Later base caption/hashtag changes do not flow into already-edited channels | Expected but easy to mistake for a bug |
-| 8 | Simulator keeps the previously selected platform across openings | `DeviceSimulatorModal.tsx:25-27`; `DeviceSimulator.tsx:38` | Wrong chrome can show for a newly opened post | Props are used after mount, but initial state is one-time |
-| 9 | `/api/health` reports Threads config from Meta credentials | `server.ts:809` | Cosmetic; fallback makes it equivalent in practice | Use `THREADS_*` for correctness |
-| 10 | Graph version documentation mismatch | `server.ts:10` (`v26.0`) vs `.env.example:16` (comment `v25.0`) | Confusion only | Runtime env wins |
-| 11 | Upload progress is simulated | `UnifiedComposerModal.tsx:161-198` | Progress bar is not real network progress | Intentional UI effect |
-| 12 | Validation is minimal | composer/bulk | Empty captions, no media, over-limit captions can be saved | Limits are display-only |
-| 13 | Media deletion does not clean posts | `MediaLibraryModal.tsx:76-82` | Posts keep broken references | Also true of "Clear All" |
-| 14 | Manifest import prepends without dedupe; may import `data:` URLs | `MediaLibraryModal.tsx:88-107` | Duplicates, localStorage bloat | No validation or size cap |
-| 15 | `serverMode` cached for the page lifetime | `mediaStorage.ts:13,25-28` | Backend started after page load is not detected | Reload the page |
-| 16 | Card media badge uses `post.format`, not the file MIME | `PostCard.tsx:48-50` | Misleading icon when format/media disagree | Cosmetic |
-| 17 | Test result can mark a connected IG as disconnected if no Page IG is found | `ApiSettingsModal.tsx:247-261` | UI-only; reopening the modal re-syncs | Warning path returns `ok:false` |
+| 6 | Date handling still mixes local dates and `toISOString()` in a few places | `MonthView`/`WeekView`/`DayView` now use `localDateString()`; composer picker fixed | Cells could shift by a day | Scheduler compares against `publishAt` computed in the backend's zone (`timezone` is stored per post) |
+| 7 | Overrides snapshot base values at first edit | `UnifiedComposerModal.tsx` | Later base caption/hashtag changes do not flow into already-edited channels | Expected but easy to mistake for a bug |
+| 8 | Simulator keeps the previously selected platform across openings | `DeviceSimulatorModal.tsx`; `DeviceSimulator.tsx` | Wrong chrome can show for a newly opened post | Props are used after mount, but initial state is one-time |
+| 9 | `/api/health` reports Threads config from Meta credentials | `server.ts` | Cosmetic; fallback makes it equivalent in practice | Use `THREADS_*` for correctness |
+| 10 | Graph version documentation mismatch | `server.ts` vs `.env.example` | Confusion only | Runtime env wins |
+| 11 | ~~Upload progress was simulated~~ fixed | `UnifiedComposerModal.handleFilesAdded` | — | Now counts real per-file uploads to `/api/storage/media` |
+| 12 | Validation is now enforced at save/publish | composer `blockingIssues`, `buildCaption`, `validatePost` | Over-limit captions, browser-only media and empty media are rejected | Drafts still save without media |
+| 13 | Media deletion does not clean posts | `MediaLibraryModal.tsx` | Posts keep broken references | Publish then fails with "not in shared media storage" |
+| 14 | Manifest import prepends without dedupe; may import `data:` URLs | `MediaLibraryModal.tsx` | Duplicates, localStorage bloat | No validation or size cap |
+| 15 | `serverMode` cached for the page lifetime | `mediaStorage.ts` | Backend started after page load is not detected | Reload the page |
+| 16 | Card media badge uses `post.format`, not the file MIME | `PostCard.tsx` | Misleading icon when format/media disagree | Cosmetic |
+| 17 | Test result can mark a connected IG as disconnected if no Page IG is found | `ApiSettingsModal.tsx` | UI-only; reopening the modal re-syncs | Instagram Login path returns early, so this now only affects Page-based setups |
 | 18 | Disconnecting Facebook also removes Instagram-via-Page | shared `meta` group | May surprise users | Standalone IG is unaffected |
-| 19 | Unused dependencies: `@google/genai`, `motion`; unused helpers `fileToBase64`, `detectMediaType`; unused `BulkCampaignSeriesConfig` | `package.json`, `mediaStorage.ts:252`, `mediaUtils.ts:23`, `types/index.ts:90` | Dead weight / misleading metadata | `metadata.json` claims a Gemini capability that is not implemented |
+| 19 | Unused dependencies: `@google/genai`, `motion`; unused helpers `fileToBase64`, `detectMediaType` | `package.json`, `mediaStorage.ts`, `mediaUtils.ts` | Dead weight | `metadata.json` claims a Gemini capability that is not implemented |
 | 20 | Tailwind utilities from absent plugins | various components | `animate-in`, `fade-in`, `slide-in-from-bottom-3`, `scrollbar-none`, `scrollbar-thin`, `xs:` do nothing | Cosmetic; `animate-spin`/`pulse` work |
-| 21 | No production backend build/start | `package.json` | `build` emits frontend only; `clean` removes a non-existent `server.js` | Run with `tsx` |
-| 22 | Backend has no auth, binds all interfaces | `server.ts:935` | Anyone reaching it can read state, disconnect accounts, read/write media | Local-only assumption |
-| 23 | Callback HTML does not escape provider detail; receiver accepts any origin | `server.ts:100-108`; `ApiSettingsModal.tsx:124-142` | Potential XSS in an origin-served callback page; weak postMessage validation | Harden if exposed |
-| 24 | OAuth state file is plaintext | `.secrets/oauth-states.json` | Contains state + PKCE verifier while a flow is in flight | Short-lived |
+| 21 | No production backend build/start | `package.json` | `build` emits frontend only; the scheduler only runs under `tsx` | Publishing needs the backend to be running |
+| 22 | Backend has no auth, binds all interfaces | `app.listen(PORT)` | Anyone reaching the port can publish, delete posts, read/write media | Now more dangerous: publish/unpublish routes act on real accounts |
+| 23 | Callback HTML does not escape provider detail; receiver accepts any origin | `server.ts` `callbackHtml` | Potential XSS in an origin-served callback page | Harden if exposed |
+| 24 | OAuth state file and media-signing key are plaintext | `.secrets/` | Short-lived state + HMAC key for public media links | Written with mode 0600 |
+| 25 | `posts.json` is the live schedule | `<RELATE_DATA_DIR>/posts.json` | Deleting it deletes the queue | Browser localStorage is a mirror; the backend wins when both exist |
 
 ---
 
@@ -141,28 +164,34 @@ Use the same local-date convention as the calendar views when comparing dates.
 Also consider deriving MonthView's "today" from local components rather than
 `toISOString()`.
 
-### 4.4 Add real publishing
+### 4.4 Adding a publishable channel (Instagram and Threads are done)
 
-Suggested backend shape:
+The delivery pipeline is generic: `publishPost()` → per-platform
+`publishOnePlatform()` → `PlatformResult` stored on the post. To add TikTok,
+YouTube or a Facebook Page:
 
-```http
-POST /api/publish
-{ "platform": "instagram", "caption": "...", "media": ["2026-10-23/hero.png"] }
-→ { "ok": true, "platformPostId": "…" } | { "ok": false, "error": "…" }
-```
+1. Write `publishTikTok(post): Promise<PlatformResult>` next to
+   `publishInstagram`. Resolve the token with `freshAccessToken('tiktok')`, take
+   the id from `store.tiktok.accountIds[0]`, and reuse `postMediaRefs()` +
+   `readyPublicUrls()` (TikTok also accepts a direct file upload instead).
+2. Add the platform to `SUPPORTED_PUBLISH` and, if deletable, extend
+   `removeFromPlatforms()` so "Remove from platforms" works in Manage posts.
+3. Map `post.format` to the provider's own type names and reject mismatches with
+   a message a normal user can act on — see the Reel/carousel guards.
+4. Never return `success` unless the provider returned an id. `skipped` means
+   "this build does not send it"; `failed` means "it tried and the provider said
+   no". The UI colours only these.
+5. Log every phase through `logPublish()` so `GET /api/publish/log` explains the
+   outcome; `provider-error` entries carry Meta's code and `fbtrace_id`.
 
-Implementation rules:
+Rules that still apply:
 
-- Resolve credentials by group; use `freshAccessToken` for refreshable groups.
-- Use the **Page token** from `metaPages` for Facebook/Instagram-via-Page.
-- Validate that media paths resolve inside the media root (reuse
-  `resolveInMediaDir`).
-- Return per-platform results; do not fail the whole batch because one channel
-  failed.
-- Add idempotency (post id + platform) to avoid duplicate publishing on retry.
-- Add auth before exposing the route.
-- Update the UI to show real results and only set `published` on confirmed
-  success.
+- Resolve credentials per account, honour `post.platformAccounts.instagram`.
+- Use the **Page token** from `metaPages` for Instagram-via-Page.
+- Validate that media paths resolve inside the media root (`resolveInMediaDir`).
+- One channel failing must not roll back another (`partial` exists for that).
+- Idempotency: a platform already recorded `success` is never re-published.
+- Authentication is still required before this leaves localhost (§3 item 1).
 
 ### 4.5 Add a platform
 

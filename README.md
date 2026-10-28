@@ -5,8 +5,20 @@ universal media library, and **real OAuth connections** to Instagram, Facebook,
 Threads, TikTok and YouTube. Preview every post through authentic in-app device
 simulators before scheduling.
 
-> Publishing to the platforms is **not implemented yet** — this build covers
-> connecting accounts and verifying them against the real APIs.
+> **Publishing is real for Instagram and Threads.** The backend creates the
+> media container, waits for the platform to finish processing, publishes, and
+> records the post id, permalink, or the provider's exact error in
+> `<data dir>\logs\publish.jsonl`. A scheduler publishes at the scheduled time
+> (backend local clock, 2-hour late grace, 3 retries with backoff). "Publish
+> now" sends immediately. TikTok, YouTube and Facebook pages are still
+> schedule-only — the app never pretends to have posted to them.
+>
+> Two prerequisites for a live publish: the media file must sit in shared
+> storage (uploaded through the app or picked from the local library), and
+> `PUBLIC_MEDIA_BASE_URL`/`APP_URL` must point at a public HTTPS address,
+> because Meta downloads the file itself. See
+> [docs/platform-setup.md](docs/platform-setup.md) for the tunnel setup and the
+> "API access blocked" error.
 
 > **Working on this repo (human or AI)?** Start with the
 > [repository knowledge base](docs/knowledge-base/README.md) — architecture,

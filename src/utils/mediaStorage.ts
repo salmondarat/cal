@@ -41,11 +41,16 @@ function asArrayBuffer(data: ArrayBuffer | Uint8Array): ArrayBuffer {
   return out;
 }
 
-async function uploadBufferToServer(date: string, name: string, data: ArrayBuffer | Uint8Array): Promise<MediaItem> {
-  const blob = new Blob([asArrayBuffer(data)]);
+async function uploadBufferToServer(
+  date: string,
+  name: string,
+  data: ArrayBuffer | Uint8Array,
+  mime = 'application/octet-stream',
+): Promise<MediaItem> {
+  const blob = new Blob([asArrayBuffer(data)], { type: mime });
   const res = await fetch(
     `/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`,
-    { method: 'POST', body: blob },
+    { method: 'POST', headers: { 'Content-Type': mime }, body: blob },
   );
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -64,19 +69,22 @@ async function uploadBufferToServer(date: string, name: string, data: ArrayBuffe
   };
 }
 
-async function saveToServer(item: MediaItem, date: string): Promise<void> {
-  if (item.serverManaged) return; // already on disk
+async function saveToServer(item: MediaItem, date: string): Promise<MediaItem> {
+  if (item.serverManaged) return item; // already on disk
   if (item.fileRef) {
-    await uploadBufferToServer(date, item.fileRef.name, await item.fileRef.arrayBuffer());
-  } else if (typeof item.url === 'string' && item.url.startsWith('data:')) {
+    return uploadBufferToServer(date, item.fileRef.name, await item.fileRef.arrayBuffer(), item.fileRef.type || item.type);
+  }
+  if (typeof item.url === 'string' && item.url.startsWith('data:')) {
     const [meta, b64] = item.url.split(',');
-    const ext = ({ 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov' } as Record<string, string>)[meta.match(/data:([^;]+)/)?.[1] || ''] || '.bin';
+    const mime = meta.match(/data:([^;]+)/)?.[1] || 'application/octet-stream';
+    const ext = ({ 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov' } as Record<string, string>)[mime] || '.bin';
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    await uploadBufferToServer(date, `${item.name || 'media'}${ext}`, bytes);
+    return uploadBufferToServer(date, `${item.name || 'media'}${ext}`, bytes, mime);
   }
   // remote http(s) URLs stay as-is: they are already shared, no copy needed
+  return item;
 }
 
 function serverItemToFileEntry(entry: any): MediaItem {
@@ -125,15 +133,14 @@ function openMediaDB(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: string): Promise<void> {
+// Returns the item the caller should keep. In backend mode this is the
+// server-side record (folderDate + /api/storage URL), which is what makes a
+// post publishable and survive a reload. Upload failures throw with the
+// backend's own reason instead of falling back silently.
+export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: string): Promise<MediaItem> {
   const date = dateFolder || localDateFolder(item.uploadedAt);
   if (await serverAvailable()) {
-    try {
-      await saveToServer(item, date);
-      return;
-    } catch {
-      console.warn('Media storage is unavailable right now; saving in this browser instead.');
-    }
+    return saveToServer(item, date);
   }
   try {
     const db = await openMediaDB();
@@ -149,9 +156,11 @@ export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: strin
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
+    return item;
   } catch {
     console.warn('Browser storage is unavailable; saving media details locally instead.');
     saveToLocalStorageFallback(item);
+    return item;
   }
 }
 
