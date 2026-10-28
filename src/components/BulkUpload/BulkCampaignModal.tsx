@@ -27,6 +27,8 @@ import {
   processFileToMediaItem,
 } from '../../utils/mediaUtils';
 import { saveMediaItemToStorage } from '../../utils/mediaStorage';
+import { toUserMessage } from '../../utils/errorMessages';
+import { friendlyErrorTitle } from '../../utils/explainError';
 
 interface BulkCampaignModalProps {
   isOpen: boolean;
@@ -87,9 +89,13 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
           setUploadError(val.error || 'File exceeds 1GB limit');
           continue;
         }
-        const item = await processFileToMediaItem(file);
-        await saveMediaItemToStorage(item);
-        newItems.push(item);
+        try {
+          const item = await processFileToMediaItem(file);
+          newItems.push(await saveMediaItemToStorage(item));
+        } catch (err) {
+          const raw = toUserMessage(err, 'the upload did not finish');
+          setUploadError(`${file.name}: ${friendlyErrorTitle(raw) || raw}`);
+        }
       }
       setMediaItems((prev) => [...prev, ...newItems]);
     } catch {
@@ -176,11 +182,6 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
         },
         status: 'scheduled',
         createdAt: new Date().toISOString(),
-        metrics: {
-          likes: Math.floor(Math.random() * 400) + 80,
-          comments: Math.floor(Math.random() * 30) + 5,
-          shares: Math.floor(Math.random() * 20) + 2,
-        },
       };
     });
 
@@ -191,16 +192,16 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
   const totalSize = mediaItems.reduce((acc, m) => acc + m.size, 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="relative w-full max-w-4xl bg-white rounded-[12px] shadow-2xl border border-neutral-200/80 overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-[rgba(15,23,42,0.34)] backdrop-blur-[2px] animate-in fade-in duration-200">
+      <div className="relative w-full max-w-4xl bg-white rounded-2xl shadow-[0_24px_64px_-16px_rgba(15,23,42,0.34)] border border-[#dde3ec] overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-neutral-50/70">
+        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-white">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-[8px] bg-[rgba(24,144,255,0.08)] border border-[rgba(24,144,255,0.2)] flex items-center justify-center text-[#0000ee]">
+            <div className="w-7 h-7 rounded-[8px] bg-[rgba(124,58,237,0.08)] border border-[rgba(124,58,237,0.2)] flex items-center justify-center text-[#6d28d9]">
               <Layers className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-[#020520] leading-none">
+              <h3 className="text-sm font-semibold text-[#0f172a] leading-none">
                 Bulk Campaign Creator & Series Scheduler
               </h3>
               <p className="text-[11px] text-neutral-500 mt-0.5">
@@ -218,11 +219,11 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fcfcfc]">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fafbfd]">
           {/* Campaign Parameters */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-[8px] relate-card">
             <div>
-              <label className="text-xs font-semibold text-[#020520] mb-1 block">
+              <label className="text-xs font-semibold text-[#0f172a] mb-1 block">
                 Campaign Name
               </label>
               <input
@@ -230,12 +231,12 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
                 value={campaignName}
                 onChange={(e) => setCampaignName(e.target.value)}
                 placeholder="e.g. Q4 Launch Week or Customer Stories Blitz"
-                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-[#020520] mb-1 block">
+              <label className="text-xs font-semibold text-[#0f172a] mb-1 block">
                 Publishing Cadence
               </label>
               <select
@@ -251,7 +252,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-[#020520] mb-1 block">
+              <label className="text-xs font-semibold text-[#0f172a] mb-1 block">
                 Series Start Date
               </label>
               <input
@@ -263,7 +264,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-[#020520] mb-1 block">
+              <label className="text-xs font-semibold text-[#0f172a] mb-1 block">
                 Daily Post Time
               </label>
               <input
@@ -290,7 +291,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
                     onClick={() => togglePlatform(pId)}
                     className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] text-xs font-medium border transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-white border-[#0000ee] text-neutral-900 shadow-2xs font-semibold'
+                        ? 'bg-white border-[#6d28d9] text-neutral-900 shadow-2xs font-semibold'
                         : 'bg-white border-neutral-200 text-neutral-500 hover:text-neutral-900'
                     }`}
                   >
@@ -332,7 +333,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
                 }}
                 className="hidden"
               />
-              <UploadCloud className="w-7 h-7 text-[#0000ee] mx-auto mb-1.5" />
+              <UploadCloud className="w-7 h-7 text-[#6d28d9] mx-auto mb-1.5" />
               <div className="text-xs font-semibold text-neutral-800">
                 Drop multiple videos or images here (up to 1.0 GB total)
               </div>
@@ -423,7 +424,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
               {campaignHashtags.map((tag) => (
                 <span
                   key={tag}
-                  className="px-2 py-0.5 text-[11px] font-mono text-[#0000ee] bg-blue-50/80 border border-blue-200 rounded-[6px]"
+                  className="px-2 py-0.5 text-[11px] font-mono text-[#6d28d9] bg-[#f5f3ff] border border-[#ddd6fe] rounded-[6px]"
                 >
                   {tag}
                 </span>
@@ -433,7 +434,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 border-t border-neutral-200 flex items-center justify-between bg-neutral-50/70">
+        <div className="px-5 py-3.5 border-t border-neutral-200 flex items-center justify-between bg-white">
           <div className="text-xs text-neutral-500 font-mono">
             {mediaItems.length} posts will be generated across {selectedPlatforms.length} channels
           </div>
@@ -448,7 +449,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
             <button
               disabled={mediaItems.length === 0}
               onClick={handleScheduleAll}
-              className="px-4 py-1.5 text-xs font-semibold text-white bg-[#0000ee] hover:bg-[#0000cc] disabled:opacity-50 disabled:cursor-not-allowed rounded-[8px] transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
+              className="px-4 py-1.5 text-xs font-semibold text-white bg-[#6d28d9] hover:bg-[#5b21b6] disabled:opacity-50 disabled:cursor-not-allowed rounded-[8px] transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
             >
               <span>Schedule Campaign Series</span>
               <ArrowRight className="w-3.5 h-3.5" />

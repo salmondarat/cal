@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Plus, ArrowDownCircle } from 'lucide-react';
 import { ScheduledPost } from '../../types';
 import { PostCard } from './PostCard';
+import { localDateString } from '../../utils/localDate';
 
 interface MonthViewProps {
   currentDate: Date;
@@ -12,7 +13,11 @@ interface MonthViewProps {
   onDeletePost: (postId: string) => void;
   onQuickAdd: (dateStr: string) => void;
   onDropMediaFiles?: (files: FileList, targetDate: string) => void;
+  onPublishPost?: (post: ScheduledPost) => void;
+  onOpenPostDetail?: (post: ScheduledPost) => void;
 }
+
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export const MonthView: React.FC<MonthViewProps> = ({
   currentDate,
@@ -23,102 +28,41 @@ export const MonthView: React.FC<MonthViewProps> = ({
   onDeletePost,
   onQuickAdd,
   onDropMediaFiles,
+  onPublishPost,
+  onOpenPostDetail,
 }) => {
   const [dragOverDate, setDragOverDate] = useState<string | null>(null);
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
+  const todayStr = localDateString();
 
-  // First day of month & total days in month
   const firstDayOfMonth = new Date(year, month, 1);
-  const startingDayOfWeek = firstDayOfMonth.getDay(); // 0 = Sunday
+  const startOffset = (firstDayOfMonth.getDay() + 6) % 7; // Monday start
   const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
 
-  // Days in previous month
-  const daysInPrevMonth = new Date(year, month, 0).getDate();
-
-  const todayStr = new Date().toISOString().split('T')[0];
-
-  interface MonthCellInfo {
-    date: Date;
-    dateStr: string;
-    dayNumber: number;
-    isCurrentMonth: boolean;
-  }
-
-  const days: MonthCellInfo[] = [];
-
-  // Previous month trailing days
-  for (let i = startingDayOfWeek - 1; i >= 0; i--) {
-    const d = daysInPrevMonth - i;
-    const prevDate = new Date(year, month - 1, d);
-    const dateStr = prevDate.toISOString().split('T')[0];
-    days.push({
-      date: prevDate,
-      dateStr,
-      dayNumber: d,
-      isCurrentMonth: false,
-    });
-  }
-
-  // Current month days
-  for (let i = 1; i <= daysInMonth; i++) {
-    const d = new Date(year, month, i);
-    const monthFormatted = String(month + 1).padStart(2, '0');
-    const dayFormatted = String(i).padStart(2, '0');
-    const dateStr = `${year}-${monthFormatted}-${dayFormatted}`;
-    days.push({
-      date: d,
-      dateStr,
-      dayNumber: i,
-      isCurrentMonth: true,
-    });
-  }
-
-  // Next month leading days to complete the 7-column grid
-  const remainingCells = 7 - (days.length % 7);
-  if (remainingCells < 7) {
-    for (let i = 1; i <= remainingCells; i++) {
-      const nextDate = new Date(year, month + 1, i);
-      const dateStr = nextDate.toISOString().split('T')[0];
-      days.push({
-        date: nextDate,
-        dateStr,
-        dayNumber: i,
-        isCurrentMonth: false,
-      });
-    }
-  }
-
-  const weekDayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-  // Rock-solid drag & drop handlers with zero flicker
-  const handleDragEnter = (e: React.DragEvent, dateStr: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOverDate(dateStr);
-  };
+  const days = Array.from({ length: totalCells }, (_, index) => {
+    const date = new Date(year, month, index - startOffset + 1);
+    return {
+      date,
+      dateStr: localDateString(date),
+      dayNumber: date.getDate(),
+      isCurrentMonth: date.getMonth() === month,
+    };
+  });
 
   const handleDragOver = (e: React.DragEvent, dateStr: string) => {
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
-    if (dragOverDate !== dateStr) {
-      setDragOverDate(dateStr);
-    }
+    if (dragOverDate !== dateStr) setDragOverDate(dateStr);
   };
 
   const handleDragLeave = (e: React.DragEvent, dateStr: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    // Only clear if the cursor actually exited the cell boundary
     const related = e.relatedTarget as Node | null;
-    if (e.currentTarget.contains(related)) {
-      return;
-    }
-    if (dragOverDate === dateStr) {
-      setDragOverDate(null);
-    }
+    if (e.currentTarget.contains(related)) return;
+    if (dragOverDate === dateStr) setDragOverDate(null);
   };
 
   const handleDrop = (e: React.DragEvent, targetDateStr: string) => {
@@ -126,102 +70,104 @@ export const MonthView: React.FC<MonthViewProps> = ({
     e.stopPropagation();
     setDragOverDate(null);
 
-    // Check for dropped media files from system
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0 && onDropMediaFiles) {
       onDropMediaFiles(e.dataTransfer.files, targetDateStr);
       return;
     }
 
-    // Check for moved post ID
     const postId =
       e.dataTransfer.getData('application/x-relate-post') ||
       e.dataTransfer.getData('text/plain');
-
-    if (postId) {
-      onMovePost(postId, targetDateStr);
-    }
+    if (postId) onMovePost(postId, targetDateStr);
   };
 
   return (
-    <div className="flex flex-col flex-1 bg-white select-none">
-      {/* Weekday Names Header */}
-      <div className="grid grid-cols-7 border-b border-neutral-200 bg-neutral-50/70 text-center py-2 text-xs font-semibold text-neutral-600">
-        {weekDayNames.map((day, idx) => (
-          <div key={idx} className="tracking-tight">
-            <span className="hidden sm:inline">{day}</span>
-            <span className="sm:hidden">{day[0]}</span>
+    <div className="flex min-h-0 flex-1 select-none flex-col overflow-auto bg-white">
+      {/* Weekday header */}
+      <div className="sticky top-0 z-20 grid grid-cols-7 border-b border-[#e8ecf2] bg-white/95 backdrop-blur-[6px] max-sm:hidden">
+        {WEEKDAYS.map((day) => (
+          <div
+            key={day}
+            className="border-r border-[#e8ecf2] px-2.5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#5b6a80] last:border-r-0"
+          >
+            {day}
           </div>
         ))}
       </div>
 
-      {/* Month Days Grid */}
-      <div className="grid grid-cols-7 auto-rows-fr flex-1 divide-x divide-y divide-neutral-200/80 bg-neutral-100">
+      {/* Month grid */}
+      <div className="grid flex-1 auto-rows-[minmax(112px,1fr)] grid-cols-7 max-sm:auto-rows-auto max-sm:grid-cols-1 max-sm:flex-none">
         {days.map((cell) => {
           const isToday = cell.dateStr === todayStr;
           const isOver = dragOverDate === cell.dateStr;
-
-          // Find posts for this day
-          const dayPosts = posts.filter((p) => p.scheduledDate === cell.dateStr);
+          const dayPosts = posts
+            .filter((p) => p.scheduledDate === cell.dateStr)
+            .sort((a, b) => a.scheduledTime.localeCompare(b.scheduledTime));
+          const shown = dayPosts.slice(0, 3);
+          const hiddenCount = dayPosts.length - shown.length;
 
           return (
             <div
               key={cell.dateStr}
-              onDragEnter={(e) => handleDragEnter(e, cell.dateStr)}
               onDragOver={(e) => handleDragOver(e, cell.dateStr)}
               onDragLeave={(e) => handleDragLeave(e, cell.dateStr)}
               onDrop={(e) => handleDrop(e, cell.dateStr)}
-              className={`min-h-[125px] sm:min-h-[145px] p-1.5 sm:p-2 flex flex-col transition-all relative group ${
-                cell.isCurrentMonth ? 'bg-white' : 'bg-neutral-50/40 text-neutral-400'
-              } ${
-                isOver
-                  ? 'bg-blue-50/70 ring-2 ring-inset ring-[#0000ee] shadow-inner'
-                  : 'hover:bg-neutral-50/30'
-              }`}
+              className={`group relative flex min-h-[112px] flex-col border-b border-r border-[#e8ecf2] p-1.5 transition-colors [&:nth-child(7n)]:border-r-0 max-sm:min-h-0 max-sm:flex-row max-sm:items-start max-sm:gap-3 max-sm:border-r-0 max-sm:px-4 max-sm:py-2.5 ${
+                cell.isCurrentMonth ? 'bg-white' : 'bg-[#fcfcfd]'
+              } ${isToday ? 'bg-[rgba(124,58,237,0.035)]' : ''} ${
+                isOver ? 'ring-2 ring-inset ring-[#6d28d9]' : 'hover:bg-[#fafbfd]'
+              } ${!cell.isCurrentMonth && dayPosts.length === 0 ? 'max-sm:hidden' : ''}`}
             >
-              {/* Day Cell Header */}
-              <div className="flex items-center justify-between mb-1 pointer-events-none">
+              <div className="mb-1 flex items-center justify-between max-sm:mb-0 max-sm:w-[64px] max-sm:shrink-0 max-sm:flex-col max-sm:items-start">
                 <span
-                  className={`inline-flex items-center justify-center text-xs font-semibold rounded-full ${
+                  className={`text-[11px] font-semibold tabular-nums ${
                     isToday
-                      ? 'w-6 h-6 bg-[#0000ee] text-white shadow-2xs'
+                      ? 'rounded-md bg-[#6d28d9] px-1.5 py-px text-white'
                       : cell.isCurrentMonth
-                      ? 'text-neutral-800'
-                      : 'text-neutral-400'
+                        ? 'text-[#334155]'
+                        : 'text-[#94a3b8]'
                   }`}
                 >
                   {cell.dayNumber}
                 </span>
-
-                {/* Quick Add Button */}
+                <span className="hidden text-[9px] font-bold uppercase tracking-[0.06em] text-[#94a3b8] max-sm:inline">
+                  {cell.date.toLocaleDateString('en-US', { weekday: 'short' })}
+                </span>
                 <button
                   type="button"
                   onClick={() => onQuickAdd(cell.dateStr)}
-                  className="pointer-events-auto opacity-0 group-hover:opacity-100 p-1 text-neutral-400 hover:text-[#0000ee] hover:bg-neutral-100 rounded-[4px] transition-all cursor-pointer"
-                  title={`Schedule post on ${cell.dateStr}`}
+                  className="grid h-5 w-5 place-items-center rounded text-[#94a3b8] opacity-0 transition-opacity hover:bg-[#f4f6f9] hover:text-[#6d28d9] focus-visible:opacity-100 group-hover:opacity-100 max-sm:absolute max-sm:right-3 max-sm:top-1/2 max-sm:-translate-y-1/2 max-sm:opacity-100"
+                  title={`Schedule a post on ${cell.dateStr}`}
+                  aria-label={`Schedule a post on ${cell.dateStr}`}
                 >
-                  <Plus className="w-3.5 h-3.5" />
+                  <Plus className="h-3 w-3" />
                 </button>
               </div>
 
-              {/* Day Posts List */}
-              <div className="flex-1 overflow-y-auto max-h-[175px] space-y-1.5 scrollbar-thin">
-                {dayPosts.map((post) => (
+              <div className="flex min-h-0 flex-1 flex-col gap-1 max-sm:min-w-0">
+                {shown.map((post) => (
                   <PostCard
                     key={post.id}
                     post={post}
+                    compact
                     onPreview={onPreviewPost}
                     onEdit={onEditPost}
                     onDelete={onDeletePost}
-                    compact={dayPosts.length > 2}
+                    onPublish={onPublishPost}
+                    onOpenDetail={onOpenPostDetail}
                   />
                 ))}
+                {hiddenCount > 0 && (
+                  <span className="pl-1 text-[9px] font-medium text-[#5b6a80]">
+                    +{hiddenCount} more
+                  </span>
+                )}
               </div>
 
-              {/* Fixed Drop Target Floating Pill that NEVER shifts layout */}
               {isOver && (
-                <div className="pointer-events-none absolute bottom-1.5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-[#0000ee] text-white text-[10px] font-medium shadow-md flex items-center gap-1 z-20 whitespace-nowrap animate-in fade-in duration-100">
-                  <ArrowDownCircle className="w-3 h-3" />
-                  <span>Drop to schedule</span>
+                <div className="pointer-events-none absolute bottom-1.5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full bg-[#7c3aed] px-2 py-0.5 text-[9.5px] font-semibold text-white shadow-md">
+                  <ArrowDownCircle className="h-3 w-3" />
+                  Drop to schedule
                 </div>
               )}
             </div>

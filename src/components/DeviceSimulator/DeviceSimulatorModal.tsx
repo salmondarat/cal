@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
-import { X, Smartphone, ArrowRight, Share2, Sparkles, CheckCircle2 } from 'lucide-react';
+import { X, Smartphone, ArrowRight, Share2, Sparkles, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { ScheduledPost, PlatformId } from '../../types';
 import { DeviceSimulator } from './DeviceSimulator';
 import { PLATFORMS } from '../../constants/platforms';
 import { PlatformIcon } from '../PlatformIcon';
+import { ManagedPost } from '../../utils/postApi';
+import { explainError } from '../../utils/explainError';
 
 interface DeviceSimulatorModalProps {
   isOpen: boolean;
@@ -11,7 +13,7 @@ interface DeviceSimulatorModalProps {
   post: ScheduledPost | null;
   allPosts: ScheduledPost[];
   onSelectPost: (post: ScheduledPost) => void;
-  onPublishNow: (post: ScheduledPost) => void;
+  onPublishNow: (post: ScheduledPost) => Promise<ManagedPost | null | undefined> | void;
 }
 
 export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
@@ -25,29 +27,50 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformId>(
     post?.platforms[0] || 'instagram'
   );
-  const [isPublishedNotification, setIsPublishedNotification] = useState(false);
+  const [publishState, setPublishState] = useState<{
+    postId: string;
+    status: 'publishing' | 'done' | 'error';
+    message: string;
+  } | null>(null);
 
   if (!isOpen || !post) return null;
 
-  const handlePublish = () => {
-    onPublishNow(post);
-    setIsPublishedNotification(true);
-    setTimeout(() => {
-      setIsPublishedNotification(false);
-    }, 3500);
+  const active = publishState?.postId === post.id ? publishState : null;
+
+  const handlePublish = async () => {
+    setPublishState({ postId: post.id, status: 'publishing', message: `Sending ${post.title} to ${post.platforms.join(', ')}...` });
+    try {
+      const settled = await onPublishNow(post);
+      if (!settled) {
+        setPublishState({ postId: post.id, status: 'error', message: 'Publishing stopped before the platform answered. Check Manage posts → Activity log.' });
+        return;
+      }
+      const succeeded = Object.entries(settled.results || {}).filter(([, r]) => r.status === 'success').map(([p]) => p);
+      const failure = explainError(settled.lastError);
+      setPublishState({
+        postId: post.id,
+        status: settled.status === 'published' ? 'done' : 'error',
+        message:
+          settled.status === 'published'
+            ? `Live on ${succeeded.join(', ')}${settled.results?.instagram?.permalink ? ` — ${settled.results.instagram.permalink}` : ''}`
+            : `${failure?.title || 'The post did not go through.'} ${failure?.steps?.[0] || 'Open Manage posts → this card for details.'}`,
+      });
+    } catch {
+      setPublishState({ postId: post.id, status: 'error', message: 'Publishing did not finish. See Manage posts → Activity log.' });
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="relative w-full max-w-4xl bg-white rounded-[12px] shadow-2xl border border-neutral-200/80 overflow-hidden flex flex-col max-h-[94vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-[rgba(15,23,42,0.34)] backdrop-blur-[2px] animate-in fade-in duration-200">
+      <div className="relative w-full max-w-4xl bg-white rounded-2xl shadow-[0_24px_64px_-16px_rgba(15,23,42,0.34)] border border-[#dde3ec] overflow-hidden flex flex-col max-h-[94vh]">
         {/* Modal Header */}
-        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-neutral-50/70">
+        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-white">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-[8px] bg-[rgba(24,144,255,0.08)] border border-[rgba(24,144,255,0.2)] flex items-center justify-center text-[#0000ee]">
+            <div className="w-7 h-7 rounded-[8px] bg-[rgba(124,58,237,0.08)] border border-[rgba(124,58,237,0.2)] flex items-center justify-center text-[#6d28d9]">
               <Smartphone className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-[#020520] leading-none">
+              <h3 className="text-sm font-semibold text-[#0f172a] leading-none">
                 Interactive Format & Device Simulator
               </h3>
               <p className="text-[11px] text-neutral-500 mt-0.5">
@@ -65,7 +88,7 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
                   const target = allPosts.find((p) => p.id === e.target.value);
                   if (target) onSelectPost(target);
                 }}
-                className="text-xs bg-white border border-neutral-200 rounded-[8px] px-2.5 py-1.5 font-medium text-neutral-800 focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                className="text-xs bg-white border border-neutral-200 rounded-[8px] px-2.5 py-1.5 font-medium text-neutral-800 focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
               >
                 {allPosts.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -85,17 +108,17 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
         </div>
 
         {/* Modal Body: Split view (Left: Post info & platform checklist, Right: Device Mockup) */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 grid grid-cols-1 md:grid-cols-12 gap-6 bg-[#fcfcfc]">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 grid grid-cols-1 md:grid-cols-12 gap-6 bg-[#fafbfd]">
           {/* Left Column: Post Specs & Platform Breakdown */}
           <div className="md:col-span-5 flex flex-col justify-between space-y-4">
             <div className="space-y-4">
               {/* Campaign Title & Date */}
               <div className="p-3.5 rounded-[8px] relate-card">
-                <span className="text-[11px] font-mono text-[#0000ee] font-medium uppercase tracking-wider">
+                <span className="text-[11px] font-mono text-[#6d28d9] font-medium uppercase tracking-wider">
                   Campaign Title
                 </span>
-                <h4 className="text-sm font-semibold text-[#020520] mt-0.5">{post.title}</h4>
-                <div className="mt-2 pt-2 border-t border-[rgba(24,144,255,0.15)] flex items-center justify-between text-xs text-neutral-600 font-mono">
+                <h4 className="text-sm font-semibold text-[#0f172a] mt-0.5">{post.title}</h4>
+                <div className="mt-2 pt-2 border-t border-[rgba(124,58,237,0.15)] flex items-center justify-between text-xs text-neutral-600 font-mono">
                   <span>Scheduled: {post.scheduledDate}</span>
                   <span>Time: {post.scheduledTime}</span>
                 </div>
@@ -118,7 +141,7 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
                         onClick={() => setSelectedPlatform(pId)}
                         className={`p-2.5 rounded-[8px] border transition-all cursor-pointer flex items-center justify-between ${
                           isCurrent
-                            ? 'bg-white border-[#0000ee] shadow-2xs ring-1 ring-[#0000ee]'
+                            ? 'bg-white border-[#6d28d9] shadow-2xs ring-1 ring-[#6d28d9]'
                             : 'bg-white border-neutral-200 hover:border-neutral-300'
                         }`}
                       >
@@ -167,25 +190,45 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
               </div>
             </div>
 
-            {/* Publishing Simulation Actions */}
-            <div className="pt-4 border-t border-neutral-200 space-y-2">
-              {isPublishedNotification && (
-                <div className="p-2.5 rounded-[8px] bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2 animate-in fade-in">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>
-                    Successfully simulated publishing to {post.platforms.length} connected
-                    channel accounts!
-                  </span>
+            {/* Publishing Actions */}
+            <div className="sticky bottom-0 z-10 space-y-2 border-t border-neutral-200 bg-[#fafbfd]/95 pt-3 backdrop-blur-[2px]">
+              {active && (
+                <div
+                  className={`p-2.5 rounded-[8px] text-xs flex items-start gap-2 ${
+                    active.status === 'done'
+                      ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                      : active.status === 'error'
+                        ? 'bg-red-50 border border-red-200 text-red-800'
+                        : 'bg-amber-50 border border-amber-200 text-amber-800'
+                  }`}
+                >
+                  {active.status === 'publishing' ? (
+                    <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                  ) : active.status === 'done' ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                  )}
+                  <span className="break-words">{active.message}</span>
                 </div>
               )}
 
               <div className="flex items-center gap-2">
                 <button
-                  onClick={handlePublish}
-                  className="flex-1 py-2 px-3 text-xs font-semibold text-white bg-[#0000ee] hover:bg-[#0000cc] rounded-[8px] transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  onClick={() => void handlePublish()}
+                  disabled={active?.status === 'publishing'}
+                  className="flex-1 py-2 px-3 text-xs font-semibold text-white bg-[#6d28d9] hover:bg-[#5b21b6] rounded-[8px] transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
                 >
-                  <Share2 className="w-3.5 h-3.5" />
-                  <span>Simulate Instant Publish</span>
+                  {active?.status === 'publishing' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Share2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {active?.status === 'publishing'
+                      ? 'Publishing to the platform...'
+                      : `Publish now to ${post.platforms.map((p) => PLATFORMS[p]?.name || p).join(', ')}`}
+                  </span>
                 </button>
               </div>
             </div>

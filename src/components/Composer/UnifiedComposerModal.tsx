@@ -14,6 +14,8 @@ import {
   Play,
   ArrowRight,
   HardDrive,
+  Send,
+  Loader2,
 } from 'lucide-react';
 import {
   PlatformId,
@@ -30,17 +32,22 @@ import {
   processFileToMediaItem,
 } from '../../utils/mediaUtils';
 import { saveMediaItemToStorage } from '../../utils/mediaStorage';
+import { toUserMessage } from '../../utils/errorMessages';
+import { friendlyErrorTitle } from '../../utils/explainError';
+import { localDateString } from '../../utils/localDate';
 
 interface UnifiedComposerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSavePost: (post: ScheduledPost) => void;
+  onSavePost: (post: ScheduledPost) => void | Promise<unknown>;
+  onPublishPost?: (post: ScheduledPost) => void | Promise<unknown>;
   initialPost?: ScheduledPost | null;
   initialDate?: string;
   initialTime?: string;
   initialMedia?: MediaItem[];
   onPreviewPost?: (post: ScheduledPost) => void;
   availableStoredMedia?: MediaItem[];
+  backendOnline?: boolean | null;
 }
 
 const COMMON_TAGS = [
@@ -58,18 +65,18 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   isOpen,
   onClose,
   onSavePost,
+  onPublishPost,
   initialPost,
   initialDate,
   initialTime,
   initialMedia,
   onPreviewPost,
   availableStoredMedia = [],
+  backendOnline = null,
 }) => {
   const [title, setTitle] = useState('');
   const [showLibraryPicker, setShowLibraryPicker] = useState(false);
-  const [scheduledDate, setScheduledDate] = useState(
-    initialDate || new Date().toISOString().split('T')[0]
-  );
+  const [scheduledDate, setScheduledDate] = useState(initialDate || localDateString());
   const [scheduledTime, setScheduledTime] = useState(initialTime || '10:00');
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformId[]>([
     'instagram',
@@ -91,8 +98,10 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadTotal, setUploadTotal] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isDragOverDropZone, setIsDragOverDropZone] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -113,7 +122,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
     } else {
       const seededMedia = initialMedia ? [...initialMedia] : [];
       setTitle('');
-      setScheduledDate(initialDate || new Date().toISOString().split('T')[0]);
+      setScheduledDate(initialDate || localDateString());
       setScheduledTime(initialTime || '10:00');
       setSelectedPlatforms(['instagram', 'tiktok', 'youtube']);
       setBaseFormat(
@@ -181,50 +190,53 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
     if (validFiles.length === 0) return;
 
     setIsUploading(true);
-    setUploadProgress(20);
-
-    // Simulate upload progression for user visual feedback
-    const timer = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev >= 90) {
-          clearInterval(timer);
-          return 90;
-        }
-        return prev + 25;
-      });
-    }, 150);
+    setUploadTotal(validFiles.length);
+    setUploadProgress(0);
 
     try {
       const newMediaItems: MediaItem[] = [];
-      for (const file of validFiles) {
-        const item = await processFileToMediaItem(file);
-        await saveMediaItemToStorage(item);
-        newMediaItems.push(item);
+      const failures: string[] = [];
+      for (let i = 0; i < validFiles.length; i++) {
+        const file = validFiles[i];
+        try {
+          const item = await processFileToMediaItem(file);
+          newMediaItems.push(await saveMediaItemToStorage(item));
+        } catch (err) {
+          const raw = toUserMessage(err, 'the upload did not finish');
+          failures.push(`${file.name}: ${friendlyErrorTitle(raw) || raw}`);
+        }
+        setUploadProgress(i + 1);
       }
 
-      clearInterval(timer);
-      setUploadProgress(100);
+      if (failures.length) {
+        setUploadError(`${failures.length} file(s) could not be copied into shared media storage — ${failures.join(' | ')}`);
+      }
 
-      setTimeout(() => {
-        const combined = [...mediaList, ...newMediaItems];
-        setMediaList(combined);
-
-        // Auto-update baseFormat
-        if (combined.length > 1) {
-          setBaseFormat('carousel');
-        } else if (combined.length === 1 && combined[0].type.startsWith('video/')) {
-          setBaseFormat('video');
-        } else {
-          setBaseFormat('image');
-        }
-
+      if (!newMediaItems.length) {
         setIsUploading(false);
         setUploadProgress(0);
-      }, 300);
-    } catch {
-      clearInterval(timer);
+        return;
+      }
+
+      const combined = [...mediaList, ...newMediaItems];
+      setMediaList(combined);
+
+      // Auto-update baseFormat
+      if (combined.length > 1) {
+        setBaseFormat('carousel');
+      } else if (combined.length === 1 && combined[0].type.startsWith('video/')) {
+        setBaseFormat('video');
+      } else {
+        setBaseFormat('image');
+      }
+
       setIsUploading(false);
-      setUploadError('Failed to process media files.');
+      setUploadProgress(0);
+      setUploadTotal(0);
+    } catch {
+      setIsUploading(false);
+      setUploadProgress(0);
+      setUploadError('The media upload did not finish. Check that the schedule service is running, then try again.');
     }
   };
 
@@ -290,18 +302,57 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
       },
       status,
       createdAt: initialPost?.createdAt || new Date().toISOString(),
-      metrics: initialPost?.metrics || {
-        likes: Math.floor(Math.random() * 800) + 120,
-        comments: Math.floor(Math.random() * 60) + 10,
-        shares: Math.floor(Math.random() * 40) + 5,
-      },
     };
   };
 
-  const handleSave = (status: 'scheduled' | 'draft' = 'scheduled') => {
-    const post = buildPostObject(status);
-    onSavePost(post);
+  const blockingIssues: string[] = [];
+  if (!mediaList.length) blockingIssues.push('Attach at least one image or video.');
+  const browserOnly = mediaList.filter((m) => !m.serverManaged);
+  if (browserOnly.length) {
+    blockingIssues.push(
+      `${browserOnly.length} file(s) live only in this browser (${browserOnly.map((m) => m.name).join(', ')}). Re-upload them so the scheduler can reach the file.`,
+    );
+  }
+  for (const pId of selectedPlatforms) {
+    const override = platformOverrides[pId];
+    const caption = override?.caption ?? baseCaption;
+    const tags = override?.hashtags ?? baseHashtags;
+    const length = `${caption}${tags.length ? `\n\n${tags.join(' ')}` : ''}`.length;
+    if (length > PLATFORMS[pId].charLimit) {
+      blockingIssues.push(`${PLATFORMS[pId].name} caption is ${length} characters; the limit is ${PLATFORMS[pId].charLimit.toLocaleString()}.`);
+    }
+  }
+  if (baseFormat === 'video' && !mediaList.some((m) => m.type.startsWith('video/'))) {
+    blockingIssues.push('Format is set to video but no video file is attached.');
+  }
+
+  const handleSave = async (status: 'scheduled' | 'draft' = 'scheduled') => {
+    if (blockingIssues.length) {
+      setUploadError(blockingIssues[0]);
+      return;
+    }
+    await onSavePost(buildPostObject(status));
     onClose();
+  };
+
+  const handlePublishNow = async () => {
+    if (blockingIssues.length) {
+      setUploadError(blockingIssues[0]);
+      return;
+    }
+    if (!backendOnline) {
+      setUploadError('Start the schedule service (pnpm dev:server) before publishing.');
+      return;
+    }
+    setIsPublishing(true);
+    try {
+      const post = buildPostObject('scheduled');
+      await onSavePost(post);
+      await onPublishPost?.(post);
+      onClose();
+    } finally {
+      setIsPublishing(false);
+    }
   };
 
   const handleLivePreview = () => {
@@ -313,16 +364,16 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   const totalMediaBytes = mediaList.reduce((acc, m) => acc + m.size, 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="relative w-full max-w-4xl bg-white rounded-[12px] shadow-2xl border border-neutral-200/80 overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-[rgba(15,23,42,0.34)] backdrop-blur-[2px] animate-in fade-in duration-200">
+      <div className="relative w-full max-w-4xl bg-white rounded-2xl shadow-[0_24px_64px_-16px_rgba(15,23,42,0.34)] border border-[#dde3ec] overflow-hidden flex flex-col max-h-[92vh]">
         {/* Modal Header */}
-        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-neutral-50/70">
+        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-white">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-[8px] bg-[#020520] text-white flex items-center justify-center font-bold text-xs">
+            <div className="w-7 h-7 rounded-[8px] bg-[#0f172a] text-white flex items-center justify-center font-bold text-xs">
               R
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-[#020520] leading-none">
+              <h3 className="text-sm font-semibold text-[#0f172a] leading-none">
                 {initialPost ? 'Edit Scheduled Social Post' : 'Unified Social Post Composer'}
               </h3>
               <p className="text-[11px] text-neutral-500 mt-0.5">
@@ -335,7 +386,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
             {mediaList.length > 0 && (
               <button
                 onClick={handleLivePreview}
-                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#0000ee] bg-blue-50/80 hover:bg-blue-100/80 border border-[rgba(24,144,255,0.3)] rounded-[6px] transition-colors cursor-pointer"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#6d28d9] bg-[#f5f3ff] hover:bg-[#ede9fe] border border-[rgba(124,58,237,0.3)] rounded-[6px] transition-colors cursor-pointer"
               >
                 <Smartphone className="w-3.5 h-3.5" />
                 <span>Device Preview</span>
@@ -352,10 +403,10 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fcfcfc]">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fafbfd]">
           {/* Section 1: Target Platforms Selection */}
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-[#0f1f3d] flex items-center justify-between">
+            <label className="text-xs font-semibold text-[#1e293b] flex items-center justify-between">
               <span>Select Target Channels</span>
               <span className="text-[11px] font-normal text-neutral-500">
                 {selectedPlatforms.length} active
@@ -374,7 +425,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                     onClick={() => togglePlatform(pId)}
                     className={`p-2.5 rounded-[8px] border text-left transition-all flex items-center gap-2.5 cursor-pointer ${
                       isSelected
-                        ? 'bg-white border-[#0000ee] shadow-2xs ring-1 ring-[#0000ee]'
+                        ? 'bg-white border-[#6d28d9] shadow-2xs ring-1 ring-[#6d28d9]'
                         : 'bg-white border-neutral-200/90 hover:border-neutral-300 text-neutral-600'
                     }`}
                   >
@@ -417,7 +468,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
           {/* Section 2: Media Ingestion Zone (Support up to 1 GB) */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-[#0f1f3d] flex items-center gap-1.5">
+              <label className="text-xs font-semibold text-[#1e293b] flex items-center gap-1.5">
                 <span>Upload Media Assets</span>
                 <span className="text-[10px] font-mono text-neutral-400">
                   (Images, Videos & Carousels up to 1.0 GB)
@@ -456,8 +507,8 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
               onClick={() => fileInputRef.current?.click()}
               className={`p-6 border-2 border-dashed rounded-[10px] text-center transition-all cursor-pointer relative ${
                 isDragOverDropZone
-                  ? 'border-[#0000ee] bg-blue-50/70'
-                  : 'border-neutral-200/90 hover:border-[#1890ff] bg-neutral-50/60 hover:bg-neutral-50'
+                  ? 'border-[#6d28d9] bg-[#f5f3ff]/70'
+                  : 'border-neutral-200/90 hover:border-[#7c3aed] bg-neutral-50/60 hover:bg-neutral-50'
               }`}
             >
               <input
@@ -472,7 +523,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
               />
 
               <div className="flex flex-col items-center justify-center space-y-1.5">
-                <div className="w-10 h-10 rounded-full bg-[rgba(24,144,255,0.08)] border border-[rgba(24,144,255,0.2)] flex items-center justify-center text-[#0000ee]">
+                <div className="w-10 h-10 rounded-full bg-[rgba(124,58,237,0.08)] border border-[rgba(124,58,237,0.2)] flex items-center justify-center text-[#6d28d9]">
                   <UploadCloud className="w-5 h-5" />
                 </div>
                 <div className="text-xs font-semibold text-neutral-800">
@@ -486,13 +537,15 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
               {isUploading && (
                 <div className="mt-3 max-w-xs mx-auto">
                   <div className="flex items-center justify-between text-[11px] font-mono text-neutral-600 mb-1">
-                    <span>Processing Media...</span>
-                    <span>{uploadProgress}%</span>
+                    <span>Uploading to shared storage...</span>
+                    <span>
+                      {uploadProgress}/{uploadTotal || mediaList.length || 1}
+                    </span>
                   </div>
                   <div className="w-full h-1.5 bg-neutral-200 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-[#0000ee] transition-all duration-200"
-                      style={{ width: `${uploadProgress}%` }}
+                      className="h-full bg-[#6d28d9] transition-all duration-200"
+                      style={{ width: `${uploadTotal ? (uploadProgress / uploadTotal) * 100 : 30}%` }}
                     />
                   </div>
                 </div>
@@ -505,9 +558,9 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowLibraryPicker(!showLibraryPicker)}
-                  className="px-2 py-0.5 text-[10px] font-medium text-[#0000ee] bg-blue-50/80 border border-blue-200 rounded-[6px] hover:bg-blue-100 transition-colors cursor-pointer flex items-center gap-1"
+                  className="px-2 py-0.5 text-[10px] font-medium text-[#6d28d9] bg-[#f5f3ff] border border-[#ddd6fe] rounded-[6px] hover:bg-[#ede9fe] transition-colors cursor-pointer flex items-center gap-1"
                 >
-                  <HardDrive className="w-3 h-3 text-[#0000ee]" />
+                  <HardDrive className="w-3 h-3 text-[#6d28d9]" />
                   <span>Choose from Saved Storage ({availableStoredMedia.length})</span>
                 </button>
               )}
@@ -538,7 +591,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                           else if (asset.type.startsWith('video/')) setBaseFormat('video');
                         }
                       }}
-                      className="p-1.5 rounded-[6px] border border-neutral-200 bg-white hover:border-[#0000ee] cursor-pointer text-left transition-all group"
+                      className="p-1.5 rounded-[6px] border border-neutral-200 bg-white hover:border-[#6d28d9] cursor-pointer text-left transition-all group"
                     >
                       <div className="aspect-video bg-neutral-900 rounded-[4px] overflow-hidden relative mb-1">
                         {asset.type.startsWith('video/') ? (
@@ -599,7 +652,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                       <button
                         type="button"
                         onClick={() => removeMediaItem(item.id)}
-                        className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-red-600 transition-colors"
+                        className="absolute top-1 right-1 p-1 rounded-full bg-[rgba(15,23,42,0.34)] text-white hover:bg-red-600 transition-colors"
                       >
                         <Trash2 className="w-3 h-3" />
                       </button>
@@ -618,7 +671,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
           {/* Section 3: Campaign Title, Date & Time */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
-              <label className="text-xs font-semibold text-[#0f1f3d] mb-1 block">
+              <label className="text-xs font-semibold text-[#1e293b] mb-1 block">
                 Campaign / Post Title
               </label>
               <input
@@ -626,31 +679,31 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="e.g. Q4 Product Launch Teaser"
-                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-[#0f1f3d] mb-1 block">
+              <label className="text-xs font-semibold text-[#1e293b] mb-1 block">
                 Scheduled Date
               </label>
               <input
                 type="date"
                 value={scheduledDate}
                 onChange={(e) => setScheduledDate(e.target.value)}
-                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-[#0f1f3d] mb-1 block">
+              <label className="text-xs font-semibold text-[#1e293b] mb-1 block">
                 Base Scheduled Time
               </label>
               <input
                 type="time"
                 value={scheduledTime}
                 onChange={(e) => setScheduledTime(e.target.value)}
-                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
               />
             </div>
           </div>
@@ -659,7 +712,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
           <div className="space-y-3 p-4 rounded-[8px] relate-card">
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-[#020520]">
+                <label className="text-xs font-semibold text-[#0f172a]">
                   Core Caption (Shared across all channels)
                 </label>
                 <span className="text-[11px] font-mono text-neutral-500">
@@ -671,13 +724,13 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 value={baseCaption}
                 onChange={(e) => setBaseCaption(e.target.value)}
                 placeholder="Write your primary message, announcement, or story here..."
-                className="w-full px-3 py-2 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee] leading-relaxed"
+                className="w-full px-3 py-2 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9] leading-relaxed"
               />
             </div>
 
             {/* Hashtag Management */}
             <div>
-              <label className="text-xs font-semibold text-[#020520] mb-1 block">
+              <label className="text-xs font-semibold text-[#0f172a] mb-1 block">
                 Hashtags ({baseHashtags.length})
               </label>
 
@@ -693,7 +746,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                     }
                   }}
                   placeholder="Type hashtag and press Enter..."
-                  className="flex-1 px-3 py-1 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                  className="flex-1 px-3 py-1 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
                 />
                 <button
                   type="button"
@@ -709,7 +762,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 {baseHashtags.map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono text-[#0000ee] bg-white border border-[rgba(24,144,255,0.3)] rounded-[6px]"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono text-[#6d28d9] bg-white border border-[rgba(124,58,237,0.3)] rounded-[6px]"
                   >
                     <span>{tag}</span>
                     <button
@@ -731,7 +784,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                     key={t}
                     type="button"
                     onClick={() => handleAddHashtag(t)}
-                    className="text-neutral-600 hover:text-[#0000ee] hover:underline"
+                    className="text-neutral-600 hover:text-[#6d28d9] hover:underline"
                   >
                     {t}
                   </button>
@@ -743,7 +796,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
           {/* Section 5: Individual Platform Customization Tabs */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-[#0f1f3d]">
+              <label className="text-xs font-semibold text-[#1e293b]">
                 Individual Channel Customization
               </label>
               <span className="text-[11px] text-neutral-500">
@@ -765,7 +818,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                     onClick={() => setActivePlatformTab(pId)}
                     className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t-[8px] transition-colors whitespace-nowrap cursor-pointer ${
                       isActive
-                        ? 'bg-white border-x border-t border-neutral-200 text-[#0000ee] font-semibold -mb-1 pb-2 shadow-2xs'
+                        ? 'bg-white border-x border-t border-neutral-200 text-[#6d28d9] font-semibold -mb-1 pb-2 shadow-2xs'
                         : 'text-neutral-600 hover:text-neutral-900'
                     }`}
                   >
@@ -807,7 +860,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                       updatePlatformOverride(activePlatformTab, 'caption', e.target.value)
                     }
                     placeholder="Leave as base caption or customize for this audience..."
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#0000ee]"
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#6d28d9]"
                   />
                 </div>
 
@@ -894,38 +947,73 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 py-3.5 border-t border-neutral-200 flex flex-col sm:flex-row items-center justify-between gap-3 bg-neutral-50/70">
-          <div className="flex items-center gap-2 text-xs text-neutral-500 font-mono">
-            <Clock className="w-3.5 h-3.5 text-[#0000ee]" />
-            <span>
-              Queueing for {scheduledDate} at {scheduledTime}
-            </span>
-          </div>
+        <div className="px-5 py-3.5 border-t border-neutral-200 flex flex-col gap-2.5 bg-white">
+          {(blockingIssues.length > 0 || uploadError) && (
+            <div className="space-y-1">
+              {uploadError && (
+                <div className="flex items-start gap-1.5 text-[11px] text-red-700">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                  <span>{uploadError}</span>
+                </div>
+              )}
+              {blockingIssues.slice(0, 3).map((issue) => (
+                <div key={issue} className="flex items-start gap-1.5 text-[11px] text-amber-800">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                  <span>{issue}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3.5 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50 cursor-pointer"
-            >
-              Cancel
-            </button>
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-neutral-500 font-mono">
+              <Clock className="w-3.5 h-3.5 text-[#6d28d9]" />
+              <span>
+                Queueing for {scheduledDate} at {scheduledTime}
+              </span>
+              {backendOnline === false && (
+                <span className="text-amber-700">backend offline</span>
+              )}
+            </div>
 
-            <button
-              type="button"
-              onClick={() => handleSave('draft')}
-              className="px-3.5 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50 cursor-pointer"
-            >
-              Save Draft
-            </button>
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-3.5 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50 cursor-pointer"
+              >
+                Cancel
+              </button>
 
-            <button
-              type="button"
-              onClick={() => handleSave('scheduled')}
-              className="px-4 py-1.5 text-xs font-semibold text-white bg-[#020520] hover:bg-[#0f1f3d] rounded-[8px] transition-colors shadow-xs cursor-pointer"
-            >
-              Schedule Across Channels
-            </button>
+              <button
+                type="button"
+                onClick={() => void handleSave('draft')}
+                className="px-3.5 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-[8px] hover:bg-neutral-50 cursor-pointer"
+              >
+                Save Draft
+              </button>
+
+              {onPublishPost && (
+                <button
+                  type="button"
+                  onClick={() => void handlePublishNow()}
+                  disabled={isPublishing}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-[#6d28d9] bg-white border border-[#6d28d9] rounded-[8px] hover:bg-[#f5f3ff] transition-colors cursor-pointer disabled:opacity-60 inline-flex items-center gap-1.5"
+                  title="Send to the connected channels immediately"
+                >
+                  {isPublishing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                  <span>{isPublishing ? 'Publishing...' : 'Publish now'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void handleSave('scheduled')}
+                className="px-4 py-1.5 text-xs font-semibold text-white bg-[#0f172a] hover:bg-[#1e293b] rounded-[8px] transition-colors shadow-xs cursor-pointer"
+              >
+                Schedule Across Channels
+              </button>
+            </div>
           </div>
         </div>
       </div>

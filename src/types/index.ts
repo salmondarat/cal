@@ -103,12 +103,6 @@ export interface ScheduledPost {
   platformAccounts?: Partial<Record<PlatformId, string>>; // per-post account id (e.g. Instagram Login user id)
   status: PostStatus;
   createdAt: string;
-  metrics?: {
-    likes: number;
-    comments: number;
-    shares: number;
-    views?: number;
-  };
   // Delivery state, owned by the backend and mirrored into this browser.
   publishAt?: string; // absolute ISO instant derived from scheduledDate + scheduledTime
   timezone?: string; // IANA zone the backend used for publishAt
