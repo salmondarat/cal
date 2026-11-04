@@ -271,7 +271,7 @@ test('the browse payloads match the frontend client types', async () => {
   const { body } = await get('/api/fs/dirs');
   assert.deepEqual(Object.keys(body).sort(), ['entries', 'isRoot', 'limit', 'name', 'parent', 'path', 'places', 'truncated']);
   assert.deepEqual(Object.keys(body.entries[0] ?? {}).sort(), ['name', 'path']);
-  assert.deepEqual(Object.keys(body.places[0]).sort(), ['kind', 'name', 'path']);
+  assert.deepEqual(Object.keys(body.places[0] ?? {}).sort(), ['kind', 'name', 'path']);
 
   const probe = await get('/api/fs/folder-picker');
   assert.deepEqual(Object.keys(probe.body).sort(), ['available', 'backend', 'detail', 'platform']);
