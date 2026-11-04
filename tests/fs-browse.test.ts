@@ -264,6 +264,53 @@ test('probe reports browsing disabled when MEDIA_BROWSE is off', async () => {
   }
 });
 
+test('places never offer hidden folders or filesystem artifacts', async () => {
+  // An NTFS/FUSE mount exposes $RECYCLE.BIN and .Recycle.bin next to the real
+  // volumes. They are not places a user means to browse, and they would
+  // otherwise fill the Places list.
+  const previous = process.env.MEDIA_BROWSE_ROOTS;
+  try {
+    // Configured roots replace the defaults, so unset them to exercise the
+    // default discovery (home + mounted volumes) where the filter applies.
+    delete process.env.MEDIA_BROWSE_ROOTS;
+    const { body } = await get('/api/fs/dirs');
+    const names = body.places.map((p: any) => p.name);
+    assert.ok(names.includes('Home'), `Home is always a place: ${names.join(', ')}`);
+    assert.ok(!names.some((n: string) => n.startsWith('.')), `hidden place offered: ${names.join(', ')}`);
+    assert.ok(!names.some((n: string) => n.toLowerCase() === '$recycle.bin'), `$RECYCLE.BIN offered: ${names.join(', ')}`);
+    assert.ok(!names.some((n: string) => n.toLowerCase() === 'lost+found'), `lost+found offered: ${names.join(', ')}`);
+  } finally {
+    restoreEnv('MEDIA_BROWSE_ROOTS', previous);
+  }
+});
+
+test('every offered volume is a real mount point', async () => {
+  // A volume is a mount, not a folder that happens to sit under /media or
+  // /mnt. Offering "Program Files" or "Recovery" as a browsable place would
+  // be noise: those are directories inside a mounted disk.
+  if (process.platform !== 'linux') return;
+  const previous = process.env.MEDIA_BROWSE_ROOTS;
+  try {
+    delete process.env.MEDIA_BROWSE_ROOTS;
+    const mounts = new Set(
+      fs
+        .readFileSync('/proc/mounts', 'utf8')
+        .split('\n')
+        .map((line) => line.trim().split(/\s+/)[1])
+        .filter(Boolean)
+        .map((point) => point!.replace(/\\040/g, ' ')),
+    );
+    const { body } = await get('/api/fs/dirs');
+    const volumes = body.places.filter((p: any) => p.kind === 'volume');
+    assert.ok(volumes.length > 0, 'this machine has at least one mounted volume');
+    for (const volume of volumes) {
+      assert.ok(mounts.has(volume.path), `${volume.path} is offered as a volume but is not a mount point`);
+    }
+  } finally {
+    restoreEnv('MEDIA_BROWSE_ROOTS', previous);
+  }
+});
+
 test('the browse payloads match the frontend client types', async () => {
   // Guards the contract between the server's JSON and the client's
   // ServerFolderListing / FolderPickerCapability: a renamed field would

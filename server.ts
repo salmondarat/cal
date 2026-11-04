@@ -1500,6 +1500,32 @@ function childDirectories(dir: string): string[] {
 }
 
 // Read at call time so a test can flip MEDIA_BROWSE_ROOTS between requests.
+// Filesystem artifacts that are never worth offering as a browsable place:
+// the Windows leftovers an NTFS or FUSE mount exposes.
+const VOLUME_ARTIFACTS = new Set(['$recycle.bin', 'system volume information', 'lost+found']);
+
+// A volume is a mount point, not merely a directory. On a desktop a USB disk
+// mounts at /run/media/<user>/<label>; on a NAS or a Windows partition the
+// mount sits at /run/media/<label> with ordinary folders beside it that are
+// not volumes at all. /proc/mounts is what tells the two apart.
+function linuxMountPoints(): string[] {
+  try {
+    const mounts = fs.readFileSync('/proc/mounts', 'utf8');
+    const points: string[] = [];
+    for (const line of mounts.split('\n')) {
+      const fields = line.trim().split(/\s+/);
+      const mountPoint = fields[1];
+      if (!mountPoint) continue;
+      const decoded = mountPoint.replace(/\\040/g, ' ');
+      if (!/^\/(media|mnt|run\/media)(\/|$)/.test(decoded)) continue;
+      points.push(decoded);
+    }
+    return points;
+  } catch {
+    return [];
+  }
+}
+
 function browseRoots(): BrowseRoot[] {
   const configured = process.env.MEDIA_BROWSE_ROOTS;
   if (configured && configured.trim()) {
@@ -1519,8 +1545,13 @@ function browseRoots(): BrowseRoot[] {
   const seen = new Set<string>([roots[0].path]);
   const addVolume = (volumePath: string) => {
     if (seen.has(volumePath) || !existingDirectory(volumePath)) return;
+    const name = path.basename(volumePath) || volumePath;
+    // Skip filesystem artifacts: hidden directories and the Windows
+    // leftovers an NTFS/FUSE mount exposes. They are not places a user
+    // means to browse, and they would otherwise fill the Places list.
+    if (name.startsWith('.') || VOLUME_ARTIFACTS.has(name.toLowerCase())) return;
     seen.add(volumePath);
-    roots.push({ name: path.basename(volumePath) || volumePath, path: volumePath, kind: 'volume' });
+    roots.push({ name, path: volumePath, kind: 'volume' });
   };
 
   if (process.platform === 'win32') {
@@ -1532,10 +1563,15 @@ function browseRoots(): BrowseRoot[] {
   } else if (process.platform === 'darwin') {
     for (const volume of childDirectories('/Volumes')) addVolume(volume);
   } else {
-    for (const base of ['/media', '/mnt', '/run/media']) {
-      for (const volume of childDirectories(base)) {
-        addVolume(volume);
-        for (const nested of childDirectories(volume)) addVolume(nested);
+    const mounts = linuxMountPoints();
+    if (mounts.length > 0) {
+      for (const mount of mounts) addVolume(mount);
+    } else {
+      // /proc/mounts is unavailable (some containers hide it). Fall back to
+      // the immediate children of the usual media roots — one level only, so
+      // the list stays short.
+      for (const base of ['/media', '/mnt', '/run/media']) {
+        for (const volume of childDirectories(base)) addVolume(volume);
       }
     }
   }
