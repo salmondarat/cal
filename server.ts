@@ -2004,19 +2004,19 @@ export async function pickFolderNative(chain: PickerBackend[] = defaultPickerCha
         logDetail(`folder picker backend unavailable: ${backend.id}`, detail);
         continue;
       }
-      if (err?.killed) {
-        // Node killed the child (timeout): nobody answered the dialog.
-        logDetail(`folder picker timed out: ${backend.id}`, detail);
-        return { canceled: true };
-      }
       if (err?.statusCode) {
         // A backend refusal carries its own status and message (the portal's
         // GVFS refusal is statusCode 400). It must reach the client intact, so
         // it is re-thrown instead of being swallowed by the fall-through below.
-        // Checked before the cancellation rules so a refusal can never be
-        // misread as a dismissal.
+        // Checked before every cancellation rule, so a refusal can never be
+        // misread as a dismissal or as a timeout.
         logDetail(`folder picker backend refused: ${backend.id}`, detail);
         throw err;
+      }
+      if (err?.killed) {
+        // Node killed the child (timeout): nobody answered the dialog.
+        logDetail(`folder picker timed out: ${backend.id}`, detail);
+        return { canceled: true };
       }
       if (err?.signal) {
         // Crashed on its own (signal without Node killing it) — not a dismissal.
@@ -2183,7 +2183,11 @@ app.post('/api/library/pick-folder', async (req, res) => {
     // Only an error that explicitly carries a statusCode may pass its own
     // message through (the portal's GVFS refusal). Every other failure gets
     // the canned copy, so a backend exception can never leak to the client.
-    const ownStatus = Number.isInteger(err?.statusCode) ? err.statusCode : null;
+    // The status must be a real HTTP status: Express throws on 0 or an
+    // out-of-range value, which would turn the JSON answer into an HTML 500.
+    const ownStatus = Number.isInteger(err?.statusCode) && err.statusCode >= 100 && err.statusCode <= 599
+      ? err.statusCode
+      : null;
     res.status(status === 501 ? 501 : status === 409 ? 409 : ownStatus ?? 500).json({
       error: status === 501
         ? 'No native folder picker is available on this system. Paste the folder path instead.'
