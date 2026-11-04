@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import express from 'express';
@@ -1699,10 +1699,36 @@ function hasDisplay(): boolean {
 
 let cachedCapability: { key: string; value: PickerCapability } | null = null;
 
+// python3 on PATH is not enough: without PyGObject (or with a GTK too old for
+// Gtk.FileDialog) the gtk4 backend would advertise itself and open nothing.
+// The result is cached so the probe spawns python at most once per process —
+// a missing PyGObject will not appear while the server runs, so a negative
+// answer sticks until `?refresh=1` forces a re-check.
+const GTK4_IMPORT_CHECK = 'import gi; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk; Gtk.FileDialog';
+let cachedGtk4Import: boolean | null = null;
+
+function gtk4Importable(force = false): boolean {
+  if (cachedGtk4Import !== null && !force) return cachedGtk4Import;
+  let ok = false;
+  if (hasCommand('python3')) {
+    try {
+      execFileSync('python3', ['-c', GTK4_IMPORT_CHECK], { timeout: 5000 });
+      ok = true;
+    } catch (err: any) {
+      logDetail(
+        'gtk4 import check failed',
+        `code=${err?.code ?? 'none'} signal=${err?.signal ?? 'none'} killed=${Boolean(err?.killed)} stderr=${String(err?.stderr ?? '').trim() || 'none'}`,
+      );
+    }
+  }
+  cachedGtk4Import = ok;
+  return ok;
+}
+
 // MEDIA_PICKER_BACKEND pins one backend id (lowercased so `Zenity` and `zenity`
 // behave identically); `none` = no native dialog; `auto` (the default) probes
 // the platform chain below.
-function resolvePickerBackend(): string | null {
+function resolvePickerBackend(force = false): string | null {
   const forced = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
   if (forced === 'none') return null;
   if (forced !== 'auto') return forced;
@@ -1711,7 +1737,7 @@ function resolvePickerBackend(): string | null {
   if (hasDisplay()) {
     if (hasCommand('zenity')) return 'zenity';
     if (hasCommand('kdialog')) return 'kdialog';
-    if (hasCommand('python3')) return 'gtk4'; // GTK itself is probed when the backend runs
+    if (gtk4Importable(force)) return 'gtk4';
   }
   return 'portal';
 }
@@ -1722,7 +1748,8 @@ function probeFolderPicker(force = false): PickerCapability {
   // Key covers every env input the value depends on (platform, the pinned
   // MEDIA_PICKER_BACKEND id, MEDIA_BROWSE), so a flag flipped inside this
   // process is picked up on the next request; `force` bypasses the cache for
-  // inputs the key cannot see, such as PATH or the display.
+  // inputs the key cannot see, such as PATH, the display or the GTK4 import
+  // check above.
   const forced = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
   const key = `${platform}|${forced}|${enabled}`;
   if (!force && cachedCapability && cachedCapability.key === key) return cachedCapability.value;
@@ -1736,7 +1763,7 @@ function probeFolderPicker(force = false): PickerCapability {
       detail: 'Folder browsing is turned off on this computer. Paste the folder path instead.',
     };
   } else {
-    const backend = resolvePickerBackend();
+    const backend = resolvePickerBackend(force);
     value = {
       platform,
       available: Boolean(backend),
@@ -1793,11 +1820,48 @@ function commandBackend(id: string, cmd: string, args: string[], isCancellation?
   };
 }
 
-// Tasks 5 and 6 replace these stubs with the real GTK4 and portal backends.
-// Until then they throw ENOENT so the chain falls through to the others.
+// The gtk4 backend drives a GTK4 FileDialog from an inline Python script: it
+// prints the chosen absolute path, or the sentinel `__CANCELED__` when the
+// dialog is dismissed (exit code 0 either way). It needs no isCancellation
+// predicate — a python failure (no PyGObject, GTK too old, script error) exits
+// non-zero and must fall through to the next backend, never read as a cancel.
+const GTK4_SCRIPT = [
+  'import sys',
+  'import gi',
+  'gi.require_version("Gtk", "4.0")',
+  'from gi.repository import GLib, Gtk',
+  'app = Gtk.Application(application_id="app.cal.folderpicker")',
+  'def on_activate(application):',
+  // hold() keeps the GtkApplication alive while the dialog is open: with no
+  // window of its own, GApplication would drop its use count to zero and exit
+  // as soon as activate returns, killing the portal request mid-flight.
+  '    application.hold()',
+  '    dialog = Gtk.FileDialog(title="Select a media folder")',
+  '    def on_done(source, result):',
+  '        try:',
+  '            folder = source.select_folder_finish(result)',
+  '            print(folder.get_path(), flush=True)',
+  '        except GLib.Error:',
+  '            print("__CANCELED__", flush=True)',
+  '        application.quit()',
+  '    dialog.select_folder(None, None, on_done)',
+  'app.connect("activate", on_activate)',
+  'app.run([])',
+].join('\n');
+
 function gtk4PickerBackend(): PickerBackend {
-  return { id: 'gtk4', run: async () => { throw Object.assign(new Error('gtk4 backend not implemented'), { code: 'ENOENT' }); } };
+  return {
+    id: 'gtk4',
+    run: async () => {
+      const { stdout } = await execFileAsync('python3', ['-c', GTK4_SCRIPT], { timeout: PICKER_TIMEOUT });
+      const chosen = stdout.trim();
+      if (!chosen || chosen === '__CANCELED__') return { canceled: true };
+      return { canceled: false, path: chosen };
+    },
+  };
 }
+// Task 6 replaces this stub with the real portal backend.
+// Until then it throws ENOENT so the chain falls through to the others.
 function portalPickerBackend(): PickerBackend {
   return { id: 'portal', run: async () => { throw Object.assign(new Error('portal backend not implemented'), { code: 'ENOENT' }); } };
 }
@@ -1858,6 +1922,9 @@ export async function pickFolderNative(chain: PickerBackend[] = defaultPickerCha
   }
   throw Object.assign(new Error('No native folder picker is available. Paste the folder path instead.'), { statusCode: 501 });
 }
+
+// Exposed so tests can drive the real backends without going through the chain.
+export const __pickerBackends = { gtk4: gtk4PickerBackend, portal: portalPickerBackend };
 
 export function createPickerGate() {
   let busy = false;

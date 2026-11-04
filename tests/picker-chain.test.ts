@@ -180,3 +180,37 @@ test('osascript -128 stderr cancels, plain exit 1 does not', async () => {
     Object.defineProperty(process, 'platform', descriptor);
   }
 });
+
+// Opens a real window, so it is opt-in: MEDIA_TEST_PICKER=1 plus a display.
+// The default `pnpm test` stays fast and non-interactive; dismissing the
+// dialog by hand is covered by the manual verification step instead.
+test(
+  'gtk4 backend reports the sentinel when the dialog is dismissed',
+  {
+    skip:
+      process.env.MEDIA_TEST_PICKER !== '1'
+        ? 'set MEDIA_TEST_PICKER=1 to run a test that opens a real dialog'
+        : !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY
+          ? 'no display'
+          : false,
+  },
+  async () => {
+    const backend = (await import('../server.ts')).__pickerBackends.gtk4();
+    const result = await backend.run();
+    assert.deepEqual(result, { canceled: true });
+  },
+);
+
+test('gtk4 has no cancellation predicate: a python failure falls through, never cancels', async () => {
+  const backend = (await import('../server.ts')).__pickerBackends.gtk4();
+  assert.equal(backend.isCancellation, undefined, 'gtk4 cancels via the __CANCELED__ sentinel, not an error predicate');
+  const chain = [
+    // A non-zero python exit (no PyGObject, GTK too old, script error) must
+    // fall through to the next backend, not read as a dismissal.
+    { ...backend, run: async () => { throw Object.assign(new Error('Gtk import failed'), { code: 1 }); } },
+    { id: 'next', run: async () => ({ canceled: false as const, path: '/tmp/picked' }) },
+  ];
+  const { value, warns } = await runCaptured(() => pickFolderNative(chain));
+  assert.deepEqual(value, { canceled: false, path: '/tmp/picked' });
+  assert.ok(warns.some((w) => w.includes('gtk4') && w.includes('code=1')), 'gtk4 failure is logged and falls through');
+});
