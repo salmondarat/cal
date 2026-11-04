@@ -498,9 +498,12 @@ Rules that follow:
    path (this spec) is the one that unlocks real use — but only for a local
    backend. Both features ship; the local one is implemented first.
 4. **Media durability is a separate prod-readiness gate.** `DATA_DIR` resolves to
-   `%LOCALAPPDATA%\RelateSocial` or `~/.local/share/RelateSocial` (`server.ts:684`),
-   which is ephemeral in a container. Hosted production needs a mounted volume or
-   object storage before uploaded media can be relied on. Independent of the picker.
+   `%LOCALAPPDATA%\RelateSocial` on Windows and `~/AppData/Local/RelateSocial` on
+   macOS/Linux when `LOCALAPPDATA` is unset (`server.ts:684`) — a deliberately
+   Windows-shaped fallback kept for compatibility with existing installs; set
+   `RELATE_DATA_DIR` to place it elsewhere (e.g. an XDG path). It is ephemeral in
+   a container. Hosted production needs a mounted volume or object storage before
+   uploaded media can be relied on. Independent of the picker.
 
 ## 12. Deferred
 
