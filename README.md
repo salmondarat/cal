@@ -22,7 +22,7 @@ simulators before scheduling.
 - **Device simulators** — see how a post renders on Instagram, Facebook, Threads, TikTok and YouTube.
 - **Universal media library** — files stored on disk outside the project, organized by
   `YYYY-MM-DD` folders and shared across every browser/port/build.
-- **Local folder scanner** — add any folder path or use the native OS folder picker
+- **Local folder scanner** — browse the machine's folders in the app, use the native OS folder picker, or paste a path
   (Windows, macOS, Linux) and browse subfolders and media in place (files are never
   copied or moved). The grid has type filters and sort controls.
 - **Media preview** — click any asset for a full-size lightbox with metadata, video
@@ -120,6 +120,10 @@ Media endpoints: `GET /api/storage/info`, `GET /api/storage/media/dates`,
 `GET /api/storage/thumbnail?date=YYYY-MM-DD&name=<file>&w=480`.
 Only folders named `YYYY-MM-DD` are scanned; uploads are limited to
 jpg/jpeg/png/webp/gif/mp4/webm/mov up to 1 GB.
+
+Folder browsing endpoints: `GET /api/fs/dirs` (lists one folder, scoped to the
+browse roots), `GET /api/fs/folder-picker` (reports whether this computer has
+a native folder dialog).
 
 Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/roots/:id`,
 `GET /api/library/list?root=<id>&path=<relative>`, `GET /api/library/file?root=<id>&path=<relative>`

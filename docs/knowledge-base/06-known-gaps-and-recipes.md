@@ -90,6 +90,16 @@ Before exposing the backend beyond localhost:
 9. **Add a security header baseline** (CSP, `X-Content-Type-Options`,
    `Referrer-Policy`) on backend HTML responses.
 10. **Do not log tokens** — current code does not, keep it that way.
+11. **Folder browsing enumerates the filesystem** — `GET /api/fs/dirs` lists
+    directories on the machine running the backend. It is scoped to *browse
+    roots* (the home folder plus real mount points, or exactly
+    `MEDIA_BROWSE_ROOTS`), and it refuses requests from another device unless
+    `MEDIA_BROWSE_REMOTE=1`. The locality check reads the `Host` header,
+    which is a guarding rail against accidental exposure, **not
+    authentication** — anyone who can send raw requests to the port can forge
+    it. Set `MEDIA_BROWSE=0` in any hosted deployment: there the endpoint
+    would enumerate a container's filesystem, which may be shared with other
+    tenants.
 
 ---
 
@@ -129,7 +139,37 @@ fallback mode behaves predictably.
 3. Clear `seedMedia` when the composer closes so it does not leak into the next
    new post.
 
-### 4.3 Fix "Today"
+### 4.3 Point the media library at a folder
+
+The library panel offers three ways to add a folder, and they are not
+interchangeable:
+
+- **Browse folders…** — the server lists directories and the browser renders
+  them. This is the one that works everywhere: another device, a headless
+  server, a desktop. The path it returns is a real path on the machine
+  running the backend, and the media is referenced in place — nothing is
+  copied.
+- **Use system dialog** — the native OS folder chooser (zenity, kdialog,
+  GTK4, the desktop portal, `osascript`, PowerShell). It appears only when
+  the server reports a backend **and** the page is on the server's own
+  machine, because the dialog opens on the server's screen, not on the
+  phone's. If no backend exists the button is simply absent.
+- **Paste a path** — always available, and the way in when browsing is
+  turned off or the folder is not under a browse root.
+
+To widen or narrow what can be browsed:
+
+- `MEDIA_BROWSE_ROOTS` — a list of paths (`os.path.delimiter` separated).
+  When set, it is the *entire* allowlist: the home folder is not added
+  implicitly.
+- `MEDIA_BROWSE=0` — turns the browser off entirely; pasting still works.
+- `MEDIA_BROWSE_REMOTE=1` — lets another device browse. Off by default.
+
+A volume in the Places list is a real mount point (read from
+`/proc/mounts` on Linux), not any directory that happens to sit under
+`/media` or `/mnt`.
+
+### 4.4 Fix "Today"
 
 `handleToday` should set the current date, for example:
 
@@ -141,7 +181,7 @@ Use the same local-date convention as the calendar views when comparing dates.
 Also consider deriving MonthView's "today" from local components rather than
 `toISOString()`.
 
-### 4.4 Add real publishing
+### 4.5 Add real publishing
 
 Suggested backend shape:
 
@@ -164,7 +204,7 @@ Implementation rules:
 - Update the UI to show real results and only set `published` on confirmed
   success.
 
-### 4.5 Add a platform
+### 4.6 Add a platform
 
 1. `src/types/index.ts` — extend `PlatformId`.
 2. `src/constants/platforms.ts` — add the `PlatformConfig` entry and
@@ -179,7 +219,7 @@ Implementation rules:
 7. `docs/platform-setup.md` + this knowledge base — document registration.
 8. `npm run lint` and manual OAuth/media checks.
 
-### 4.6 Add a calendar view
+### 4.7 Add a calendar view
 
 1. Extend `CalendarViewMode`.
 2. Add a component under `src/components/Calendar/` receiving the same handler

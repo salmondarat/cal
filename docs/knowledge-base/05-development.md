@@ -41,6 +41,15 @@ cp .env.example .env        # Windows: copy .env.example .env
 | `RELATE_DATA_DIR` | media | `%LOCALAPPDATA%\RelateSocial` | Resolved against backend cwd |
 | `GEMINI_API_KEY` | — | — | **Unused**; AI Studio scaffold residue |
 | `DISABLE_HMR` | dev | unset | `true` disables HMR/file watching |
+| `MEDIA_BROWSE_ROOTS` | library | unset | Folder browsing allowlist (`os.path.delimiter` separated). Unset = home folder + mounted volumes; when set, exactly those paths and nothing else. |
+| `MEDIA_BROWSE` | library | `1` | `0`/`off`/`false`/`no` turns the folder browser off. Unset means on. |
+| `MEDIA_BROWSE_REMOTE` | library | `0` | Only `1` lets another device (phone, tunnel) browse folders. |
+| `FS_LIST_LIMIT` | library | `1000` | Max subfolders returned per listing. |
+
+`pnpm test` runs the backend route tests (`node --import tsx --test
+tests/*.test.ts`). There is no frontend test harness — the React side is
+verified by `pnpm lint` (`tsc --noEmit`) and `pnpm build`, plus manual
+click-through.
 
 Credential fallback chain matters: Instagram Login works with a Threads app or
 even the Meta app if the scopes/use case exist; Threads works with Meta

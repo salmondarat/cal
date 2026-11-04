@@ -132,6 +132,40 @@ renders the result inline; no token ever reaches the page.
 `url: /api/storage/media/file?date=…&name=…`.
 `GET /api/storage/media/file` streams from disk with `Cache-Control: no-cache`.
 
+### 3.6 Folder browsing
+
+The media library can be pointed at any folder on the machine running the
+backend. The backend lists directories; the browser renders them. That
+inverts the usual direction on purpose — a browser can never hand a web app
+an absolute path, so the only way to browse folders is to ask the server what
+it can see.
+
+`GET /api/fs/dirs?path=…` → one folder's listing:
+
+```
+{ path, name, parent, isRoot, limit,
+  places: [{ name, path, kind: 'home' | 'volume' | 'custom' }],
+  entries: [{ name, path }], truncated }
+```
+
+- **Browse roots** are the only folders reachable: `MEDIA_BROWSE_ROOTS` if set
+  (exactly those paths, nothing else), otherwise the home folder plus mounted
+  volumes. On Linux a volume is a *mount point* read from `/proc/mounts`, not
+  a directory that happens to sit under `/media` or `/mnt` — otherwise
+  `Program Files` and `Recovery` show up as browsable places.
+- Paths are compared with `realpath` after a textual check, so a symlink
+  cannot escape a root.
+- `parent` is `null` at a root; `truncated` is true when the listing hit
+  `FS_LIST_LIMIT`.
+- The route refuses requests from another device unless
+  `MEDIA_BROWSE_REMOTE=1` (see [06-known-gaps-and-recipes.md](./06-known-gaps-and-recipes.md)).
+
+`GET /api/fs/folder-picker?refresh=1` → whether this computer has a native
+folder dialog, and which backend: `{ platform, available, backend, detail }`.
+Backends are tried in order — `zenity`, `kdialog`, GTK4, the desktop portal
+on Linux; `osascript` on macOS; PowerShell on Windows. A missing backend is a
+capability gap, not an error: the UI simply does not offer the button.
+
 ---
 
 ## 4. Design constraints and invariants
