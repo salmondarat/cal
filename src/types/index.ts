@@ -55,6 +55,40 @@ export interface LibraryListing {
   truncated: boolean;
 }
 
+// A folder the server is willing to browse from: the user's home folder, a
+// mounted volume, or an explicitly configured path.
+export interface BrowsePlace {
+  name: string;
+  path: string;
+  kind: 'home' | 'volume' | 'custom';
+}
+
+// One subdirectory of the folder currently being browsed.
+export interface FolderEntry {
+  name: string;
+  path: string;
+}
+
+// GET /api/fs/dirs — one folder's listing, plus the places browsing can start.
+export interface ServerFolderListing {
+  path: string;
+  name: string;
+  parent: string | null;
+  isRoot: boolean;
+  limit: number;
+  places: BrowsePlace[];
+  entries: FolderEntry[];
+  truncated: boolean;
+}
+
+// GET /api/fs/folder-picker — whether a native folder dialog exists here.
+export interface FolderPickerCapability {
+  platform: string;
+  available: boolean;
+  backend: string | null;
+  detail: string | null;
+}
+
 export interface PlatformCustomization {
   caption: string;
   hashtags: string[];

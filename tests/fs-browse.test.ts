@@ -241,19 +241,40 @@ test('probe reports a stable shape and honours MEDIA_PICKER_BACKEND=none', async
   assert.equal(typeof body.available, 'boolean');
   assert.ok('backend' in body && 'detail' in body);
 
-  process.env.MEDIA_PICKER_BACKEND = 'none';
-  const off = await get('/api/fs/folder-picker?refresh=1');
-  assert.equal(off.body.available, false);
-  assert.equal(off.body.backend, null);
-  process.env.MEDIA_PICKER_BACKEND = 'auto';
+  const previous = process.env.MEDIA_PICKER_BACKEND;
+  try {
+    process.env.MEDIA_PICKER_BACKEND = 'none';
+    const off = await get('/api/fs/folder-picker?refresh=1');
+    assert.equal(off.body.available, false);
+    assert.equal(off.body.backend, null);
+  } finally {
+    restoreEnv('MEDIA_PICKER_BACKEND', previous);
+  }
 });
 
 test('probe reports browsing disabled when MEDIA_BROWSE is off', async () => {
-  process.env.MEDIA_BROWSE = '0';
-  const { body } = await get('/api/fs/folder-picker');
-  assert.equal(body.available, false);
-  assert.equal(body.detail, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
-  process.env.MEDIA_BROWSE = '1';
+  const previous = process.env.MEDIA_BROWSE;
+  try {
+    process.env.MEDIA_BROWSE = '0';
+    const { body } = await get('/api/fs/folder-picker');
+    assert.equal(body.available, false);
+    assert.equal(body.detail, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
+  } finally {
+    restoreEnv('MEDIA_BROWSE', previous);
+  }
+});
+
+test('the browse payloads match the frontend client types', async () => {
+  // Guards the contract between the server's JSON and the client's
+  // ServerFolderListing / FolderPickerCapability: a renamed field would
+  // otherwise only surface as undefined at runtime, in the modal.
+  const { body } = await get('/api/fs/dirs');
+  assert.deepEqual(Object.keys(body).sort(), ['entries', 'isRoot', 'limit', 'name', 'parent', 'path', 'places', 'truncated']);
+  assert.deepEqual(Object.keys(body.entries[0] ?? {}).sort(), ['name', 'path']);
+  assert.deepEqual(Object.keys(body.places[0]).sort(), ['kind', 'name', 'path']);
+
+  const probe = await get('/api/fs/folder-picker');
+  assert.deepEqual(Object.keys(probe.body).sort(), ['available', 'backend', 'detail', 'platform']);
 });
 
 test('probe lowercases a mixed-case forced backend id', async () => {

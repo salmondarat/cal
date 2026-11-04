@@ -1,4 +1,4 @@
-import { LibraryListing, LibraryRoot, MediaItem } from '../types';
+import { FolderPickerCapability, LibraryListing, LibraryRoot, MediaItem, ServerFolderListing } from '../types';
 import { toUserMessage } from './errorMessages';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -38,6 +38,22 @@ export function listLibraryFolder(rootId: string, path = ''): Promise<LibraryLis
   const params = new URLSearchParams({ root: rootId });
   if (path) params.set('path', path);
   return request<LibraryListing>(`/api/library/list?${params.toString()}`);
+}
+
+// List one folder on the server's filesystem. An empty path asks the server
+// for its first browse root; the server answers 403/404 with a human message
+// that `request` turns into the thrown Error.
+export function listServerFolders(path?: string): Promise<ServerFolderListing> {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  const query = params.toString();
+  return request<ServerFolderListing>(`/api/fs/dirs${query ? `?${query}` : ''}`);
+}
+
+// Whether this computer has a native folder dialog, and which backend it is.
+// `refresh` re-probes instead of using the server's cached answer.
+export function getFolderPickerCapability(refresh = false): Promise<FolderPickerCapability> {
+  return request<FolderPickerCapability>(`/api/fs/folder-picker${refresh ? '?refresh=1' : ''}`);
 }
 
 export function libraryFileToMediaItem(root: Pick<LibraryRoot, 'id' | 'name'>, file: { name: string; path: string; url: string; playUrl?: string; thumbUrl?: string; size: number; type: string; modifiedAt: string }): MediaItem {
