@@ -214,3 +214,9 @@ test('gtk4 has no cancellation predicate: a python failure falls through, never 
   assert.deepEqual(value, { canceled: false, path: '/tmp/picked' });
   assert.ok(warns.some((w) => w.includes('gtk4') && w.includes('code=1')), 'gtk4 failure is logged and falls through');
 });
+
+test('portal backend is a runnable backend', { skip: !process.env.WAYLAND_DISPLAY ? 'no session bus' : false }, async () => {
+  const backend = (await import('../server.ts')).__pickerBackends.portal();
+  assert.equal(backend.id, 'portal');
+  assert.equal(typeof backend.run, 'function');
+});

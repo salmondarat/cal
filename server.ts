@@ -1715,9 +1715,12 @@ function gtk4Importable(force = false): boolean {
       execFileSync('python3', ['-c', GTK4_IMPORT_CHECK], { timeout: 5000 });
       ok = true;
     } catch (err: any) {
+      // execFileSync failures report status/signal/error, not a numeric exit
+      // code: logging code/killed rendered `code=none killed=false` for every
+      // one. status falls back to code so ENOENT-style failures still show.
       logDetail(
         'gtk4 import check failed',
-        `code=${err?.code ?? 'none'} signal=${err?.signal ?? 'none'} killed=${Boolean(err?.killed)} stderr=${String(err?.stderr ?? '').trim() || 'none'}`,
+        `status=${err?.status ?? err?.code ?? 'none'} signal=${err?.signal ?? 'none'} error=${err?.error?.message ?? 'none'} stderr=${String(err?.stderr ?? '').trim() || 'none'}`,
       );
     }
   }
@@ -1843,7 +1846,11 @@ const GTK4_SCRIPT = [
   '            print(folder.get_path(), flush=True)',
   '        except GLib.Error:',
   '            print("__CANCELED__", flush=True)',
-  '        application.quit()',
+  // finally: quit even when a non-GLib.Error escapes select_folder_finish —
+  // otherwise the held application lives until the 5-minute timeout, which
+  // the chain would classify as a cancel rather than a backend failure.
+  '        finally:',
+  '            application.quit()',
   '    dialog.select_folder(None, None, on_done)',
   'app.connect("activate", on_activate)',
   'app.run([])',
@@ -1860,10 +1867,80 @@ function gtk4PickerBackend(): PickerBackend {
     },
   };
 }
-// Task 6 replaces this stub with the real portal backend.
-// Until then it throws ENOENT so the chain falls through to the others.
+const PORTAL_TIMEOUT = 5 * 60 * 1000;
+
+// The portal backend asks xdg-desktop-portal (through gdbus) to open its
+// native folder chooser, then waits for the Request.Response signal. Two
+// facts from spiking gdbus on this machine:
+//   - gdbus monitor filters object paths EXACTLY, but the portal answers on
+//     the request sub-path (.../request/<sender>/<token>), never on
+//     /org/freedesktop/portal/desktop itself — so the monitor runs without
+//     --object-path (sender filter only).
+//   - xdg-desktop-portal is one bus name serving every app, so its bus also
+//     carries other apps' portal responses: the response line is anchored to
+//     the request handle OpenFile returned, never matched globally.
 function portalPickerBackend(): PickerBackend {
-  return { id: 'portal', run: async () => { throw Object.assign(new Error('portal backend not implemented'), { code: 'ENOENT' }); } };
+  return {
+    id: 'portal',
+    run: async () => {
+      const token = `cal${Date.now().toString(36)}`;
+      const monitor = spawn('gdbus', [
+        'monitor', '--session', '--dest', 'org.freedesktop.portal.Desktop',
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      // spawn() reports a missing gdbus through this event; with no listener
+      // Node turns it into an uncaught exception and kills the server. The
+      // execFile below fails with ENOENT too, and the chain logs that branch.
+      monitor.on('error', (err) => {
+        logDetail('folder picker portal monitor failed', `message=${err?.message ?? 'none'}`);
+      });
+      let out = '';
+      monitor.stdout.on('data', (chunk) => { out += String(chunk); });
+
+      try {
+        const { stdout } = await execFileAsync('gdbus', [
+          'call', '--session', '--dest', 'org.freedesktop.portal.Desktop',
+          '--object-path', '/org/freedesktop/portal/desktop',
+          '--method', 'org.freedesktop.portal.FileChooser.OpenFile',
+          '', 'Select a media folder',
+          `{'handle_token': <'${token}'>, 'directory': <true>, 'multiple': <false>}`,
+        ], { timeout: PORTAL_TIMEOUT });
+
+        const requestPath = (stdout.match(/'([^']*\/request\/[^']*)'/) || [])[1];
+        if (!requestPath) {
+          throw Object.assign(new Error('portal did not return a request handle'), { code: 'ENOENT' });
+        }
+
+        // gdbus prints one line per signal: `<path>: <iface>.<member> <args>`,
+        // and g_variant_print never wraps lines, so a prefix match is exact.
+        const marker = `${requestPath}: org.freedesktop.portal.Request.Response (uint32 `;
+        const deadline = Date.now() + PORTAL_TIMEOUT;
+        while (Date.now() < deadline) {
+          const line = out.split('\n').find((l) => l.startsWith(marker));
+          if (line) {
+            const code = Number(line.match(/uint32 (\d+)/)![1]);
+            if (code !== 0) return { canceled: true };
+            // Only file:// URIs are readable here: a GVFS location (smb://,
+            // dav://, mtp://) has no file:// match, and is refused with the
+            // message below instead of failing silently later.
+            const uri = (line.match(/'file:\/\/[^']+'/) || [])[0];
+            if (!uri) {
+              throw Object.assign(new Error('That folder is a network or device location this app cannot read. Choose a folder on this computer.'), { statusCode: 400 });
+            }
+            // Percent-decoded by hand: the URI is captured from gdbus output,
+            // not parsed with new URL().
+            return { canceled: false, path: decodeURIComponent(uri.replace(/^'file:\/\//, '').replace(/'$/, '')) };
+          }
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return { canceled: true };
+      } finally {
+        // Reap the monitor on every exit path: the call itself can fail
+        // (gdbus missing, portal refusing) and a leaked monitor would
+        // outlive each attempt.
+        monitor.kill();
+      }
+    },
+  };
 }
 
 // Read MEDIA_PICKER_BACKEND at call time so a test can flip it between calls.
