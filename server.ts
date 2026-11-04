@@ -2197,16 +2197,39 @@ export function createPickerGate() {
 
 const pickerGate = createPickerGate();
 
-app.get('/api/library/roots', (_req, res) => {
+app.get('/api/library/roots', (req, res) => {
+  if (!isLocalRequest(req)) {
+    const blocked = browseGuard(req);
+    if (blocked) return res.status(403).json({ error: blocked });
+  }
   res.json(
     loadLibraryRoots().map((r) => ({ ...r, exists: fs.existsSync(r.path) })),
   );
 });
 
+// Remote clients may only read roots that live inside the browse roots; the
+// loopback client keeps the paste-any-path affordance the UI documents.
+function libraryReadGuard(req: express.Request, rootPath: string): string | null {
+  if (isLocalRequest(req)) return null;
+  return browseGuard(req)
+    ?? (isInsideRoot(rootPath, browseRoots())
+      ? null
+      : 'That folder is outside the folders this app is allowed to browse.');
+}
+
 app.post('/api/library/roots', (req, res) => {
   const raw = typeof req.body?.path === 'string' ? req.body.path : '';
   if (!raw.trim()) return res.status(400).json({ error: 'Enter a folder path first.' });
   const abs = expandUserPath(raw);
+  if (!isLocalRequest(req)) {
+    const blocked = browseGuard(req);
+    if (blocked) return res.status(403).json({ error: blocked });
+    // Textual scope check before stat, so a remote probe cannot learn whether
+    // an out-of-scope path exists (it gets 403 either way).
+    if (!isPathInside(abs, browseRoots())) {
+      return res.status(403).json({ error: 'That folder is outside the folders this app is allowed to browse.' });
+    }
+  }
   let st: fs.Stats;
   try {
     st = fs.statSync(abs);
@@ -2214,6 +2237,9 @@ app.post('/api/library/roots', (req, res) => {
     return res.status(404).json({ error: 'That folder could not be found. Check the path and try again.' });
   }
   if (!st.isDirectory()) return res.status(400).json({ error: 'That path points to a file, not a folder.' });
+  if (!isLocalRequest(req) && !isInsideRoot(abs, browseRoots())) {
+    return res.status(403).json({ error: 'That folder is outside the folders this app is allowed to browse.' });
+  }
 
   const roots = loadLibraryRoots();
   const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s;
@@ -2233,6 +2259,10 @@ app.post('/api/library/roots', (req, res) => {
 });
 
 app.delete('/api/library/roots/:id', (req, res) => {
+  if (!isLocalRequest(req)) {
+    const blocked = browseGuard(req);
+    if (blocked) return res.status(403).json({ error: blocked });
+  }
   const roots = loadLibraryRoots();
   const next = roots.filter((r) => r.id !== req.params.id);
   if (next.length === roots.length) return res.status(404).json({ error: 'That library folder is no longer available.' });
@@ -2243,6 +2273,8 @@ app.delete('/api/library/roots/:id', (req, res) => {
 app.get('/api/library/list', (req, res) => {
   const root = rootById(req.query.root);
   if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const blocked = libraryReadGuard(req, root.path);
+  if (blocked) return res.status(403).json({ error: blocked });
   const rel = typeof req.query.path === 'string' ? req.query.path : '';
   const abs = resolveInRoot(root, rel);
   if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
@@ -2303,6 +2335,8 @@ app.get('/api/library/list', (req, res) => {
 app.get('/api/library/thumbnail', (req, res) => {
   const root = rootById(req.query.root);
   if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const blocked = libraryReadGuard(req, root.path);
+  if (blocked) return res.status(403).json({ error: blocked });
   const abs = resolveInRoot(root, req.query.path);
   if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
   void serveThumbnail(req, res, abs);
@@ -2349,6 +2383,8 @@ app.post('/api/library/pick-folder', async (req, res) => {
 app.get('/api/library/file', (req, res) => {
   const root = rootById(req.query.root);
   if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const blocked = libraryReadGuard(req, root.path);
+  if (blocked) return res.status(403).json({ error: blocked });
   const abs = resolveInRoot(root, req.query.path);
   if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
 
@@ -2367,6 +2403,8 @@ app.get('/api/library/file', (req, res) => {
 app.get('/api/library/video-thumbnail', (req, res) => {
   const root = rootById(req.query.root);
   if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const blocked = libraryReadGuard(req, root.path);
+  if (blocked) return res.status(403).json({ error: blocked });
   const abs = resolveInRoot(root, req.query.path);
   if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
   void serveVideoThumbnail(req, res, abs);
@@ -2375,6 +2413,8 @@ app.get('/api/library/video-thumbnail', (req, res) => {
 app.get('/api/library/stream', (req, res) => {
   const root = rootById(req.query.root);
   if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const blocked = libraryReadGuard(req, root.path);
+  if (blocked) return res.status(403).json({ error: blocked });
   const abs = resolveInRoot(root, req.query.path);
   if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
   const mime = libraryMime(abs);
@@ -2385,6 +2425,8 @@ app.get('/api/library/stream', (req, res) => {
 app.get('/api/library/stream/status', (req, res) => {
   const root = rootById(req.query.root);
   if (!root) return res.status(404).json({ error: 'That library folder is not available.' });
+  const blocked = libraryReadGuard(req, root.path);
+  if (blocked) return res.status(403).json({ error: blocked });
   const abs = resolveInRoot(root, req.query.path);
   if (!abs) return res.status(400).json({ error: 'That folder path is not valid.' });
   void sendPlayableStatus(req, res, abs);
