@@ -42,7 +42,9 @@ function asArrayBuffer(data: ArrayBuffer | Uint8Array): ArrayBuffer {
 }
 
 async function uploadBufferToServer(date: string, name: string, data: ArrayBuffer | Uint8Array): Promise<MediaItem> {
-  const blob = new Blob([asArrayBuffer(data)]);
+  // Content-Type must be present: express.raw({type:'*/*'}) does not match a
+  // request without one, and the body would arrive empty (400).
+  const blob = new Blob([asArrayBuffer(data)], { type: 'application/octet-stream' });
   const res = await fetch(
     `/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`,
     { method: 'POST', body: blob },
@@ -52,10 +54,18 @@ async function uploadBufferToServer(date: string, name: string, data: ArrayBuffe
     throw new Error(toUserMessage((body as any)?.error, 'The media upload did not finish. Please try again.'));
   }
   const saved: any = await res.json();
+  const encodedName = encodeURIComponent(saved.name);
+  const isVideo = String(saved.type).startsWith('video/');
   return {
     id: `${saved.date}/${saved.name}`,
     name: saved.name,
     url: saved.url,
+    playbackUrl: isVideo
+      ? `/api/storage/stream?date=${saved.date}&name=${encodedName}`
+      : undefined,
+    thumbnailUrl: isVideo
+      ? `/api/storage/video-thumbnail?date=${saved.date}&name=${encodedName}&w=480`
+      : `/api/storage/thumbnail?date=${saved.date}&name=${encodedName}&w=480`,
     size: saved.size,
     type: saved.type,
     uploadedAt: saved.modifiedAt,
@@ -64,19 +74,25 @@ async function uploadBufferToServer(date: string, name: string, data: ArrayBuffe
   };
 }
 
-async function saveToServer(item: MediaItem, date: string): Promise<void> {
-  if (item.serverManaged) return; // already on disk
+// Returns the server representation when bytes were copied to disk (caller
+// must replace its in-memory item — Blob URLs die on reload), or null when
+// the item needs no copy or the server path did not complete.
+async function saveToServer(item: MediaItem, date: string): Promise<MediaItem | null> {
+  if (item.serverManaged) return null; // already on disk
+  let saved: MediaItem | null = null;
   if (item.fileRef) {
-    await uploadBufferToServer(date, item.fileRef.name, await item.fileRef.arrayBuffer());
+    saved = await uploadBufferToServer(date, item.fileRef.name, await item.fileRef.arrayBuffer());
   } else if (typeof item.url === 'string' && item.url.startsWith('data:')) {
     const [meta, b64] = item.url.split(',');
     const ext = ({ 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov' } as Record<string, string>)[meta.match(/data:([^;]+)/)?.[1] || ''] || '.bin';
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    await uploadBufferToServer(date, `${item.name || 'media'}${ext}`, bytes);
+    saved = await uploadBufferToServer(date, `${item.name || 'media'}${ext}`, bytes);
   }
   // remote http(s) URLs stay as-is: they are already shared, no copy needed
+  if (!saved) return null;
+  return { ...saved, width: item.width, height: item.height, duration: item.duration };
 }
 
 function serverItemToFileEntry(entry: any): MediaItem {
@@ -125,12 +141,13 @@ function openMediaDB(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: string): Promise<void> {
+// Returns the stable server item when the bytes landed on disk, or null when
+// the caller's item should be kept as-is (browser fallback, remote URL).
+export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: string): Promise<MediaItem | null> {
   const date = dateFolder || localDateFolder(item.uploadedAt);
   if (await serverAvailable()) {
     try {
-      await saveToServer(item, date);
-      return;
+      return await saveToServer(item, date);
     } catch {
       console.warn('Media storage is unavailable right now; saving in this browser instead.');
     }
@@ -153,6 +170,7 @@ export async function saveMediaItemToStorage(item: MediaItem, dateFolder?: strin
     console.warn('Browser storage is unavailable; saving media details locally instead.');
     saveToLocalStorageFallback(item);
   }
+  return null;
 }
 
 export async function getAllStoredMedia(): Promise<MediaItem[]> {

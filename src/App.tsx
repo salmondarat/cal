@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   CalendarViewMode,
   MediaFormat,
@@ -57,6 +57,32 @@ export default function App() {
         console.warn('Media could not be loaded right now.');
       });
   }, []);
+
+  // One-time repair: posts saved before uploads returned the server item
+  // reference dead blob: URLs. Blob URLs never survive a reload, so match the
+  // bytes by name+size against the library and repoint at the server URL.
+  const blobMigrationDone = useRef(false);
+  useEffect(() => {
+    if (blobMigrationDone.current || storedMedia.length === 0) return;
+    blobMigrationDone.current = true;
+    setPosts((prev) => {
+      let changed = false;
+      const next = prev.map((post) => {
+        if (!post.media.some((m) => typeof m.url === 'string' && m.url.startsWith('blob:'))) return post;
+        const media = post.media.map((m) => {
+          if (typeof m.url !== 'string' || !m.url.startsWith('blob:')) return m;
+          const match = storedMedia.find(
+            (s) => s.serverManaged && s.name === m.name && s.size === m.size && !s.url.startsWith('blob:'),
+          );
+          if (!match) return m;
+          changed = true;
+          return { ...m, id: match.id, url: match.url, playbackUrl: match.playbackUrl, thumbnailUrl: match.thumbnailUrl, serverManaged: true, folderDate: match.folderDate };
+        });
+        return { ...post, media };
+      });
+      return changed ? next : prev;
+    });
+  }, [storedMedia]);
 
   // Calendar State
   const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
@@ -132,8 +158,8 @@ export default function App() {
       const val = validateFileSize(file);
       if (!val.valid) continue;
       const item = await processFileToMediaItem(file);
-      await saveMediaItemToStorage(item);
-      validItems.push(item);
+      const saved = await saveMediaItemToStorage(item);
+      validItems.push(saved || item);
     }
 
     if (validItems.length > 0) {

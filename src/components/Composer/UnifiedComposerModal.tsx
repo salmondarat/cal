@@ -198,8 +198,8 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
       const newMediaItems: MediaItem[] = [];
       for (const file of validFiles) {
         const item = await processFileToMediaItem(file);
-        await saveMediaItemToStorage(item);
-        newMediaItems.push(item);
+        const saved = await saveMediaItemToStorage(item);
+        newMediaItems.push(saved || item);
       }
 
       clearInterval(timer);

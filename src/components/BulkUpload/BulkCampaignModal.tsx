@@ -88,8 +88,8 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
           continue;
         }
         const item = await processFileToMediaItem(file);
-        await saveMediaItemToStorage(item);
-        newItems.push(item);
+        const saved = await saveMediaItemToStorage(item);
+        newItems.push(saved || item);
       }
       setMediaItems((prev) => [...prev, ...newItems]);
     } catch {

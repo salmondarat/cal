@@ -181,8 +181,8 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
       if (!val.valid) continue;
 
       const item = await processFileToMediaItem(file);
-      await saveMediaItemToStorage(item);
-      newItems.push(item);
+      const saved = await saveMediaItemToStorage(item);
+      newItems.push(saved || item);
     }
 
     onMediaListChange([...newItems, ...mediaList]);
