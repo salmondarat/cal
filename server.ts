@@ -1914,23 +1914,48 @@ function portalPickerBackend(): PickerBackend {
         // and g_variant_print never wraps lines, so a prefix match is exact.
         const marker = `${requestPath}: org.freedesktop.portal.Request.Response (uint32 `;
         const deadline = Date.now() + PORTAL_TIMEOUT;
+        let answered = false;
         while (Date.now() < deadline) {
           const line = out.split('\n').find((l) => l.startsWith(marker));
           if (line) {
+            answered = true;
             const code = Number(line.match(/uint32 (\d+)/)![1]);
             if (code !== 0) return { canceled: true };
             // Only file:// URIs are readable here: a GVFS location (smb://,
             // dav://, mtp://) has no file:// match, and is refused with the
             // message below instead of failing silently later.
-            const uri = (line.match(/'file:\/\/[^']+'/) || [])[0];
+            // The match is backslash-aware: g_file_get_uri leaves `'` unencoded
+            // (it is legal in a URI path) and g_variant_print escapes it as
+            // `\'`, so a plain `[^']+` would truncate at the raw quote and
+            // mangle a folder named e.g. "Mom's photos".
+            const uri = (line.match(/'file:\/\/(?:[^'\\]|\\.)*'/) || [])[0];
             if (!uri) {
               throw Object.assign(new Error('That folder is a network or device location this app cannot read. Choose a folder on this computer.'), { statusCode: 400 });
             }
-            // Percent-decoded by hand: the URI is captured from gdbus output,
+            // Decoded in two steps, in this order: the GVariant escaping first
+            // (it escapes `'` as `\'` and `\` as `\\`), then the URI's own
+            // percent-encoding. The URI is captured from gdbus output, so it is
             // not parsed with new URL().
-            return { canceled: false, path: decodeURIComponent(uri.replace(/^'file:\/\//, '').replace(/'$/, '')) };
+            const raw = uri.replace(/^'file:\/\//, '').replace(/'$/, '');
+            const unescaped = raw.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+            return { canceled: false, path: decodeURIComponent(unescaped) };
           }
           await new Promise((r) => setTimeout(r, 200));
+        }
+        if (!answered) {
+          // The request was abandoned (timeout). Close it so the portal does
+          // not leave its dialog on the user's screen after we already
+          // reported a cancel. Best effort: a failure here must not change the
+          // result we return.
+          try {
+            await execFileAsync('gdbus', [
+              'call', '--session', '--dest', 'org.freedesktop.portal.Desktop',
+              '--object-path', requestPath,
+              '--method', 'org.freedesktop.portal.Request.Close',
+            ], { timeout: 5000 });
+          } catch (err: any) {
+            logDetail('folder picker portal close failed', `message=${err?.message ?? 'none'}`);
+          }
         }
         return { canceled: true };
       } finally {
@@ -1983,6 +2008,15 @@ export async function pickFolderNative(chain: PickerBackend[] = defaultPickerCha
         // Node killed the child (timeout): nobody answered the dialog.
         logDetail(`folder picker timed out: ${backend.id}`, detail);
         return { canceled: true };
+      }
+      if (err?.statusCode) {
+        // A backend refusal carries its own status and message (the portal's
+        // GVFS refusal is statusCode 400). It must reach the client intact, so
+        // it is re-thrown instead of being swallowed by the fall-through below.
+        // Checked before the cancellation rules so a refusal can never be
+        // misread as a dismissal.
+        logDetail(`folder picker backend refused: ${backend.id}`, detail);
+        throw err;
       }
       if (err?.signal) {
         // Crashed on its own (signal without Node killing it) — not a dismissal.
@@ -2146,12 +2180,18 @@ app.post('/api/library/pick-folder', async (req, res) => {
   } catch (err: any) {
     logDetail('folder picker failed', err);
     const status = Number(err?.statusCode) || 500;
-    res.status(status === 501 ? 501 : status === 409 ? 409 : 500).json({
+    // Only an error that explicitly carries a statusCode may pass its own
+    // message through (the portal's GVFS refusal). Every other failure gets
+    // the canned copy, so a backend exception can never leak to the client.
+    const ownStatus = Number.isInteger(err?.statusCode) ? err.statusCode : null;
+    res.status(status === 501 ? 501 : status === 409 ? 409 : ownStatus ?? 500).json({
       error: status === 501
         ? 'No native folder picker is available on this system. Paste the folder path instead.'
         : status === 409
           ? 'A folder picker is already open. Finish it first.'
-          : 'The folder picker could not open. Paste the folder path instead.',
+          : ownStatus
+            ? String(err.message)
+            : 'The folder picker could not open. Paste the folder path instead.',
     });
   }
 });

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { withFakeGdbus } from './fake-gdbus.ts';
 
 process.env.MEDIA_NO_LISTEN = '1';
 const { pickFolderNative, createPickerGate, defaultPickerChain } = await import('../server.ts');
@@ -219,4 +220,37 @@ test('portal backend is a runnable backend', { skip: !process.env.WAYLAND_DISPLA
   const backend = (await import('../server.ts')).__pickerBackends.portal();
   assert.equal(backend.id, 'portal');
   assert.equal(typeof backend.run, 'function');
+});
+
+test('chain re-throws a backend refusal instead of swallowing it', async () => {
+  // A refusal carries its own status and message (the portal's GVFS refusal
+  // is statusCode 400). It must reach the client, so the chain must not fall
+  // through and must not read it as a dismissal.
+  const refusal = Object.assign(
+    new Error('That folder is a network or device location this app cannot read. Choose a folder on this computer.'),
+    { statusCode: 400 },
+  );
+  const chain = [
+    { id: 'portal', run: async () => { throw refusal; } },
+    { id: 'next', run: async () => ({ canceled: false as const, path: '/tmp/never' }) },
+  ];
+  const { value, error } = await runCaptured(() => pickFolderNative(chain));
+  assert.equal(value, null, 'the refusal is not swallowed and the chain does not continue');
+  assert.equal(error, refusal, 'the original error is re-thrown');
+  assert.equal(error?.statusCode, 400);
+});
+
+// A fake `gdbus` on PATH lets the portal backend be driven headlessly: the
+// real tool opens a window on the user's desktop, which is not acceptable
+// during an automated run.
+test('portal backend drives the real handshake, parsing and decoding', async () => {
+  // Percent-encoding and an escaped apostrophe: g_variant_print escapes
+  // `'` as `\'`, so the fake must emit the backslash too — a raw quote is
+  // the string terminator and would truncate the URI.
+  await withFakeGdbus("file:///tmp/Picked%20Folder/Mom\\\\'s%20Photos", async () => {
+    const backend = (await import('../server.ts')).__pickerBackends.portal();
+    const { value, error } = await runCaptured(() => backend.run());
+    assert.equal(error, null, `portal backend failed: ${error?.message ?? 'unknown'}`);
+    assert.deepEqual(value, { canceled: false, path: "/tmp/Picked Folder/Mom's Photos" });
+  });
 });

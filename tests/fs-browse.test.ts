@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { withFakeGdbus } from './fake-gdbus.ts';
 
 const TMP_BASE = fs.existsSync('/tmp/opencode') ? '/tmp/opencode' : os.tmpdir();
 fs.mkdirSync(TMP_BASE, { recursive: true });
@@ -276,6 +277,28 @@ test('POST /api/library/pick-folder is refused by the browse guard with 403', as
     assert.equal(body.error, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
   } finally {
     restoreEnv('MEDIA_BROWSE', previous);
+  }
+});
+
+test('POST /api/library/pick-folder surfaces a backend refusal to the client', async () => {
+  // The mandated refusal copy must reach the user, not just the server log: a
+  // network-folder pick used to be reported as "no native folder picker is
+  // available", moments after a picker had opened.
+  const previous = process.env.MEDIA_PICKER_BACKEND;
+  const warns: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(' ')); };
+  try {
+    process.env.MEDIA_PICKER_BACKEND = 'portal';
+    await withFakeGdbus('smb://server/share', async () => {
+      const { status, body } = await post('/api/library/pick-folder');
+      assert.equal(status, 400);
+      assert.equal(body.error, 'That folder is a network or device location this app cannot read. Choose a folder on this computer.');
+    });
+    assert.ok(warns.some((w) => w.includes('refused')), 'the refusal is logged');
+  } finally {
+    console.warn = originalWarn;
+    restoreEnv('MEDIA_PICKER_BACKEND', previous);
   }
 });
 
