@@ -8,3 +8,6 @@ coverage/
 !.env.example
 .secrets/
 .aistudio/
+
+# superpowers scratch workspace (SDD ledger, briefs, review packages)
+.superpowers/
