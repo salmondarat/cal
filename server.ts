@@ -1680,6 +1680,80 @@ app.get('/api/fs/dirs', (req, res) => {
   }
 });
 
+// Capability probe for the native folder dialog. Reports server-side capability
+// only — whether the client may use it is decided in the browser, because a
+// dialog opened by a phone would appear on the server's screen.
+interface PickerCapability { platform: string; available: boolean; backend: string | null; detail: string | null }
+
+function hasCommand(cmd: string): boolean {
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const names = process.platform === 'win32' ? [`${cmd}.exe`, `${cmd}.cmd`, cmd] : [cmd];
+  return dirs.some((dir) => names.some((n) => {
+    try { return fs.statSync(path.join(dir, n)).isFile(); } catch { return false; }
+  }));
+}
+
+function hasDisplay(): boolean {
+  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+let cachedCapability: { key: string; value: PickerCapability } | null = null;
+
+// MEDIA_PICKER_BACKEND pins one backend id verbatim; `none` = no native dialog;
+// `auto` (the default) probes the platform chain below.
+function resolvePickerBackend(): string | null {
+  const requested = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim();
+  const forced = requested.toLowerCase();
+  if (forced === 'none') return null;
+  if (forced !== 'auto') return requested;
+  if (process.platform === 'win32') return hasCommand('powershell') ? 'powershell' : null;
+  if (process.platform === 'darwin') return hasCommand('osascript') ? 'osascript' : null;
+  if (hasDisplay()) {
+    if (hasCommand('zenity')) return 'zenity';
+    if (hasCommand('kdialog')) return 'kdialog';
+    if (hasCommand('python3')) return 'gtk4'; // GTK itself is probed when the backend runs
+  }
+  return 'portal';
+}
+
+function probeFolderPicker(force = false): PickerCapability {
+  const platform = process.platform;
+  const enabled = browseEnabled();
+  // Key covers every env input the value depends on (platform, the pinned
+  // MEDIA_PICKER_BACKEND id, MEDIA_BROWSE), so a flag flipped inside this
+  // process is picked up on the next request; `force` bypasses the cache for
+  // inputs the key cannot see, such as PATH or the display.
+  const forced = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
+  const key = `${platform}|${forced}|${enabled}`;
+  if (!force && cachedCapability && cachedCapability.key === key) return cachedCapability.value;
+
+  let value: PickerCapability;
+  if (!enabled) {
+    value = {
+      platform,
+      available: false,
+      backend: null,
+      detail: 'Folder browsing is turned off on this computer. Paste the folder path instead.',
+    };
+  } else {
+    const backend = resolvePickerBackend();
+    value = {
+      platform,
+      available: Boolean(backend),
+      backend,
+      detail: backend ? null : 'No zenity, kdialog, GTK4 or desktop portal backend was found.',
+    };
+  }
+  cachedCapability = { key, value };
+  return value;
+}
+
+// Not gated by browseGuard: the probe exposes no filesystem data, and an
+// unavailable capability must read as 200 { available: false }, not a 403.
+app.get('/api/fs/folder-picker', (req, res) => {
+  res.json(probeFolderPicker(req.query.refresh === '1'));
+});
+
 // ---------- Native folder picker (Windows / macOS / Linux) ----------
 
 let folderPickerBusy = false;

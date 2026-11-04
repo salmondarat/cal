@@ -106,10 +106,10 @@ test('MEDIA_BROWSE_ROOTS replaces the defaults and never yields the cwd', async 
 
 // `fetch` silently drops a custom Host header (forbidden header name), so the
 // remote gate can only be exercised through node:http.
-function getWithHost(path: string, host: string): Promise<{ status: number; body: any }> {
+function getWithHost(path: string, host: string, headers: Record<string, string> = {}): Promise<{ status: number; body: any }> {
   const port = new URL(base).port;
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, path, headers: { Host: host } }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, path, headers: { ...headers, Host: host } }, (res) => {
       let d = '';
       res.on('data', (c) => { d += c; });
       res.on('end', () => resolve({ status: res.statusCode || 0, body: JSON.parse(d || '{}') }));
@@ -187,4 +187,65 @@ test('MEDIA_BROWSE unset or any other value leaves browsing on', async () => {
   } finally {
     restoreEnv('MEDIA_BROWSE', previous);
   }
+});
+
+// Locality tests run before the probe tests: the probe tests flip MEDIA_BROWSE
+// and would leave it off for anything running after them if they ever fail.
+test('a forwarded request is not local even with a loopback Host', async () => {
+  const previous = process.env.MEDIA_BROWSE_REMOTE;
+  process.env.MEDIA_BROWSE_REMOTE = '0';
+  try {
+    const { status, body } = await getWithHost('/api/fs/dirs', '127.0.0.1', { 'x-forwarded-for': '203.0.113.7' });
+    assert.equal(status, 403);
+    assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+  } finally {
+    restoreEnv('MEDIA_BROWSE_REMOTE', previous);
+  }
+});
+
+test('a non-loopback Origin is not local even with a loopback Host', async () => {
+  const previous = process.env.MEDIA_BROWSE_REMOTE;
+  process.env.MEDIA_BROWSE_REMOTE = '0';
+  try {
+    const { status, body } = await getWithHost('/api/fs/dirs', '127.0.0.1', { origin: 'https://evil.example.com' });
+    assert.equal(status, 403);
+    assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+  } finally {
+    restoreEnv('MEDIA_BROWSE_REMOTE', previous);
+  }
+});
+
+test('both loopback Host forms are local when remote browsing is off', async () => {
+  const previous = process.env.MEDIA_BROWSE_REMOTE;
+  process.env.MEDIA_BROWSE_REMOTE = '0';
+  try {
+    const v4 = await getWithHost('/api/fs/dirs', '127.0.0.1');
+    assert.equal(v4.status, 200, 'Host: 127.0.0.1');
+    const v6 = await getWithHost('/api/fs/dirs', '[::1]');
+    assert.equal(v6.status, 200, 'Host: [::1]');
+  } finally {
+    restoreEnv('MEDIA_BROWSE_REMOTE', previous);
+  }
+});
+
+test('probe reports a stable shape and honours MEDIA_PICKER_BACKEND=none', async () => {
+  const { status, body } = await get('/api/fs/folder-picker');
+  assert.equal(status, 200);
+  assert.equal(typeof body.platform, 'string');
+  assert.equal(typeof body.available, 'boolean');
+  assert.ok('backend' in body && 'detail' in body);
+
+  process.env.MEDIA_PICKER_BACKEND = 'none';
+  const off = await get('/api/fs/folder-picker?refresh=1');
+  assert.equal(off.body.available, false);
+  assert.equal(off.body.backend, null);
+  process.env.MEDIA_PICKER_BACKEND = 'auto';
+});
+
+test('probe reports browsing disabled when MEDIA_BROWSE is off', async () => {
+  process.env.MEDIA_BROWSE = '0';
+  const { body } = await get('/api/fs/folder-picker');
+  assert.equal(body.available, false);
+  assert.equal(body.detail, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
+  process.env.MEDIA_BROWSE = '1';
 });
