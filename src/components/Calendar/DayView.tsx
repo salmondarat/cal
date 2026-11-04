@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, Clock, ArrowDownCircle } from 'lucide-react';
 import { ScheduledPost } from '../../types';
+import { formatLocalDate } from '../../utils/dateUtils';
 import { PostCard } from './PostCard';
 
 interface DayViewProps {
@@ -26,7 +27,7 @@ export const DayView: React.FC<DayViewProps> = ({
 }) => {
   const [dragOverHour, setDragOverHour] = useState<number | null>(null);
 
-  const dateStr = currentDate.toISOString().split('T')[0];
+  const dateStr = formatLocalDate(currentDate);
   const dayPosts = posts.filter((p) => p.scheduledDate === dateStr);
 
   // Hourly slots from 08:00 to 21:00

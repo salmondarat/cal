@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, Clock, ArrowDownCircle } from 'lucide-react';
 import { ScheduledPost } from '../../types';
+import { formatLocalDate } from '../../utils/dateUtils';
 import { PostCard } from './PostCard';
 
 interface WeekViewProps {
@@ -44,13 +45,13 @@ export const WeekView: React.FC<WeekViewProps> = ({
   for (let i = 0; i < 7; i++) {
     const d = new Date(start);
     d.setDate(start.getDate() + i);
-    const dateStr = d.toISOString().split('T')[0];
+    const dateStr = formatLocalDate(d);
     weekDays.push({
       date: d,
       dateStr,
       dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
       dayNumber: d.getDate(),
-      isToday: dateStr === new Date().toISOString().split('T')[0],
+      isToday: dateStr === formatLocalDate(new Date()),
     });
   }
 

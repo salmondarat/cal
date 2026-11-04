@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, ArrowDownCircle } from 'lucide-react';
 import { ScheduledPost } from '../../types';
+import { formatLocalDate } from '../../utils/dateUtils';
 import { PostCard } from './PostCard';
 
 interface MonthViewProps {
@@ -37,7 +38,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
   // Days in previous month
   const daysInPrevMonth = new Date(year, month, 0).getDate();
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = formatLocalDate(new Date());
 
   interface MonthCellInfo {
     date: Date;
@@ -52,7 +53,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
   for (let i = startingDayOfWeek - 1; i >= 0; i--) {
     const d = daysInPrevMonth - i;
     const prevDate = new Date(year, month - 1, d);
-    const dateStr = prevDate.toISOString().split('T')[0];
+    const dateStr = formatLocalDate(prevDate);
     days.push({
       date: prevDate,
       dateStr,
@@ -64,9 +65,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
   // Current month days
   for (let i = 1; i <= daysInMonth; i++) {
     const d = new Date(year, month, i);
-    const monthFormatted = String(month + 1).padStart(2, '0');
-    const dayFormatted = String(i).padStart(2, '0');
-    const dateStr = `${year}-${monthFormatted}-${dayFormatted}`;
+    const dateStr = formatLocalDate(d);
     days.push({
       date: d,
       dateStr,
@@ -80,7 +79,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
   if (remainingCells < 7) {
     for (let i = 1; i <= remainingCells; i++) {
       const nextDate = new Date(year, month + 1, i);
-      const dateStr = nextDate.toISOString().split('T')[0];
+      const dateStr = formatLocalDate(nextDate);
       days.push({
         date: nextDate,
         dateStr,
