@@ -1634,7 +1634,11 @@ function listFolderListing(target: string): ServerFolderListing {
 }
 
 // Read env at call time so a test can flip a flag between requests.
-function browseEnabled(): boolean { return process.env.MEDIA_BROWSE !== '0'; }
+function browseEnabled(): boolean {
+  const raw = String(process.env.MEDIA_BROWSE ?? '').trim().toLowerCase();
+  if (raw === '') return true; // unset means on
+  return !['0', 'off', 'false', 'no'].includes(raw);
+}
 function browseRemoteAllowed(): boolean { return process.env.MEDIA_BROWSE_REMOTE === '1'; }
 
 function isLocalRequest(req: express.Request): boolean {

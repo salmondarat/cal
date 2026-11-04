@@ -119,25 +119,72 @@ function getWithHost(path: string, host: string): Promise<{ status: number; body
   });
 }
 
+// Restore a flag even when an assertion throws, so one failure cannot leave a
+// gate flipped for the next test.
+function restoreEnv(key: string, previous: string | undefined): void {
+  if (previous === undefined) delete process.env[key];
+  else process.env[key] = previous;
+}
+
 test('refuses to browse when MEDIA_BROWSE is off', async () => {
+  const previous = process.env.MEDIA_BROWSE;
   process.env.MEDIA_BROWSE = '0';
-  const { status, body } = await get('/api/fs/dirs');
-  assert.equal(status, 403);
-  assert.equal(body.error, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
-  process.env.MEDIA_BROWSE = '1';
+  try {
+    const { status, body } = await get('/api/fs/dirs');
+    assert.equal(status, 403);
+    assert.equal(body.error, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
+  } finally {
+    restoreEnv('MEDIA_BROWSE', previous);
+  }
 });
 
 test('refuses a remote host when MEDIA_BROWSE_REMOTE is off', async () => {
+  const previous = process.env.MEDIA_BROWSE_REMOTE;
   process.env.MEDIA_BROWSE_REMOTE = '0';
-  const { status, body } = await getWithHost('/api/fs/dirs', 'example.com');
-  assert.equal(status, 403);
-  assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
-  process.env.MEDIA_BROWSE_REMOTE = '1';
+  try {
+    const { status, body } = await getWithHost('/api/fs/dirs', 'example.com');
+    assert.equal(status, 403);
+    assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+  } finally {
+    restoreEnv('MEDIA_BROWSE_REMOTE', previous);
+  }
 });
 
 test('allows a loopback host even when remote browsing is off', async () => {
+  const previous = process.env.MEDIA_BROWSE_REMOTE;
   process.env.MEDIA_BROWSE_REMOTE = '0';
-  const { status } = await getWithHost('/api/fs/dirs', 'localhost');
-  assert.equal(status, 200);
-  process.env.MEDIA_BROWSE_REMOTE = '1';
+  try {
+    const { status } = await getWithHost('/api/fs/dirs', 'localhost');
+    assert.equal(status, 200);
+  } finally {
+    restoreEnv('MEDIA_BROWSE_REMOTE', previous);
+  }
+});
+
+test('MEDIA_BROWSE off spellings (trimmed, case-insensitive) refuse browsing', async () => {
+  const previous = process.env.MEDIA_BROWSE;
+  try {
+    for (const value of ['off', 'false', 'no', ' OFF ']) {
+      process.env.MEDIA_BROWSE = value;
+      const { status, body } = await get('/api/fs/dirs');
+      assert.equal(status, 403, `MEDIA_BROWSE=${JSON.stringify(value)}`);
+      assert.equal(body.error, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
+    }
+  } finally {
+    restoreEnv('MEDIA_BROWSE', previous);
+  }
+});
+
+test('MEDIA_BROWSE unset or any other value leaves browsing on', async () => {
+  const previous = process.env.MEDIA_BROWSE;
+  try {
+    delete process.env.MEDIA_BROWSE;
+    const unset = await get('/api/fs/dirs');
+    assert.equal(unset.status, 200, 'MEDIA_BROWSE unset');
+    process.env.MEDIA_BROWSE = '2';
+    const other = await get('/api/fs/dirs');
+    assert.equal(other.status, 200, 'MEDIA_BROWSE=2');
+  } finally {
+    restoreEnv('MEDIA_BROWSE', previous);
+  }
 });
