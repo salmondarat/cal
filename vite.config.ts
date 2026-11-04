@@ -23,8 +23,11 @@ export default defineConfig(({mode}) => {
       // "localhost" is not accepted as an App Domain.
       allowedHosts: ['.localtest.me', '.trycloudflare.com', '.internalc.my.id'],
       proxy: {
-        '/auth': `http://localhost:${oauthPort}`,
-        '/api': `http://localhost:${oauthPort}`,
+        // changeOrigin must stay false: the backend's remote-client gate
+        // (isLocalRequest) reads the original Host header. Vite's default of
+        // true rewrites it to localhost and every client looks local.
+        '/auth': { target: `http://localhost:${oauthPort}`, changeOrigin: false },
+        '/api': { target: `http://localhost:${oauthPort}`, changeOrigin: false },
       },
     },
   };
