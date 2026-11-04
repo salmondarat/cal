@@ -1657,18 +1657,16 @@ function listFolderListing(target: string): ServerFolderListing {
   }
 
   const limit = FS_LIST_LIMIT();
-  const names = dirents
-    // A Dirent reports a symlink as a link, not as the directory it points
-    // at, so a symlinked folder has to be considered here too — the spec says
-    // symlinked directories are listed.
+  // Only symlinks need resolving; a plain directory's Dirent already says so,
+  // and a stat per entry would put thousands of blocking syscalls on the
+  // request thread.
+  const candidates = dirents
     .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith('.'))
-    .map((entry) => entry.name)
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  const truncated = names.length > limit;
+    .map((entry) => ({ name: entry.name, symlink: entry.isSymbolicLink() }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
   // Skip a child that points back at this folder (`ln -s . loop`): following
-  // it would walk the tree forever. A link that stays inside a root is still
-  // listed — only the self-loop is dropped.
+  // it would walk the tree forever.
   let selfReal: string;
   try {
     selfReal = fs.realpathSync(abs);
@@ -1676,17 +1674,27 @@ function listFolderListing(target: string): ServerFolderListing {
     selfReal = abs;
   }
   const entries: FolderEntry[] = [];
-  for (const name of names.slice(0, limit)) {
-    const child = path.join(abs, name);
-    try {
-      // statSync follows the link, so a link to a file is not offered.
-      if (!fs.statSync(child).isDirectory()) continue;
-      if (fs.realpathSync(child) === selfReal) continue;
-    } catch {
-      // A broken link: not worth offering.
-      continue;
+  let truncated = false;
+  for (const candidate of candidates) {
+    if (entries.length >= limit) {
+      truncated = true;
+      break;
     }
-    entries.push({ name, path: child });
+    const child = path.join(abs, candidate.name);
+    if (candidate.symlink) {
+      try {
+        const real = fs.realpathSync(child);
+        // The self-loop, a broken link, a link to a file, and a link that
+        // leaves the browse roots are all skipped: offering a folder the user
+        // cannot open is worse than not offering it.
+        if (real === selfReal) continue;
+        if (!fs.statSync(child).isDirectory()) continue;
+        if (!isInsideRoot(child, roots)) continue;
+      } catch {
+        continue;
+      }
+    }
+    entries.push({ name: candidate.name, path: child });
   }
 
   const parentDir = path.dirname(abs);
@@ -1845,13 +1853,25 @@ const PICKER_BACKEND_IDS = new Set([
   'osascript',
 ]);
 
+// Whether the chain would actually build a backend id on this platform. The
+// probe must agree with the chain: a pinned id the chain cannot build would
+// offer a button that can only ever fail.
+function chainBuildsBackend(id: string): boolean {
+  if (id === 'powershell' || id === 'pwsh') return process.platform === 'win32';
+  if (id === 'osascript') return process.platform === 'darwin';
+  return true; // zenity, kdialog, gtk4 and portal are built on every platform
+}
+
 // MEDIA_PICKER_BACKEND pins one backend id (lowercased so `Zenity` and `zenity`
 // behave identically); `none` = no native dialog; `auto` (the default) probes
 // the platform chain below.
 function resolvePickerBackend(force = false): string | null {
   const forced = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
   if (forced === 'none') return null;
-  if (forced !== 'auto') return PICKER_BACKEND_IDS.has(forced) ? forced : null;
+  if (forced !== 'auto') {
+    if (!PICKER_BACKEND_IDS.has(forced)) return null;
+    return chainBuildsBackend(forced) ? forced : null;
+  }
   if (process.platform === 'win32') {
     if (hasCommand('powershell')) return 'powershell';
     if (hasCommand('pwsh')) return 'pwsh';

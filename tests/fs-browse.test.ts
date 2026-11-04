@@ -350,6 +350,29 @@ test('an unknown MEDIA_PICKER_BACKEND reports unavailable instead of a phantom b
   }
 });
 
+test('a symlink that leaves the browse roots is not offered', async () => {
+  // Offering a folder the user cannot open (it would 403 on click) is worse
+  // than not offering it.
+  const escape = path.join(ROOT, 'escape-root');
+  try { fs.symlinkSync('/etc', escape, 'dir'); } catch { return; }
+  const { body } = await get('/api/fs/dirs?path=' + encodeURIComponent(ROOT));
+  assert.ok(!body.entries.some((e: any) => e.name === 'escape-root'), 'a link out of the roots is not listed');
+});
+
+test('a pinned backend the chain cannot build reports unavailable', async () => {
+  // Probe and chain must agree: pinning a backend this platform does not
+  // build would offer a button that can only ever fail.
+  const previous = process.env.MEDIA_PICKER_BACKEND;
+  try {
+    process.env.MEDIA_PICKER_BACKEND = process.platform === 'win32' ? 'osascript' : 'pwsh';
+    const { body } = await get('/api/fs/folder-picker?refresh=1');
+    assert.equal(body.available, false);
+    assert.equal(body.backend, null);
+  } finally {
+    restoreEnv('MEDIA_PICKER_BACKEND', previous);
+  }
+});
+
 test('the browse payloads match the frontend client types', async () => {
   // Guards the contract between the server's JSON and the client's
   // ServerFolderListing / FolderPickerCapability: a renamed field would

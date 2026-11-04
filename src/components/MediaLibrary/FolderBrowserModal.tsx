@@ -86,6 +86,10 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
     if (!isOpen) return;
     restoreFocusRef.current = document.activeElement as HTMLElement | null;
     const hint = initialPathRef.current;
+    // Move focus into the dialog straight away, before the listing arrives:
+    // otherwise focus stays on the opener and Tab walks the page behind the
+    // dialog — and the loading and error states would be unreachable.
+    listRef.current?.focus();
     void open(hint, Boolean(hint));
   }, [isOpen, open]);
 
@@ -117,10 +121,43 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
-      // Buttons outside the list (close, back, places, Cancel, "Use this
-      // folder") keep their native Enter behaviour — hijacking it would make
-      // the primary action unreachable by keyboard.
-      if (target instanceof HTMLButtonElement && !listRef.current?.contains(target)) return;
+
+      // Tab is handled before anything else, so the focus trap always runs —
+      // including while a chrome button holds focus.
+      if (event.key === 'Tab') {
+        const root = dialogRef.current;
+        if (!root) return;
+        const focusable = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (event.shiftKey && (active === first || !root.contains(active))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (active === last || !root.contains(active))) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+
+      // Enter on a chrome button (close, back, places, Cancel, "Use this
+      // folder") keeps its native behaviour — hijacking it would make the
+      // primary action unreachable by keyboard. The exemption is scoped to
+      // Enter alone, so the arrow keys still work from anywhere.
+      if (
+        event.key === 'Enter' &&
+        target instanceof HTMLButtonElement &&
+        !listRef.current?.contains(target)
+      ) {
+        return;
+      }
+
       const count = listing?.entries.length ?? 0;
       if (event.key === 'ArrowDown') {
         setHighlight((h) => Math.min(h + 1, Math.max(count - 1, 0)));
@@ -141,27 +178,6 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
         // Backspace would otherwise leave the page in some browsers.
         event.preventDefault();
         goUp();
-      } else if (event.key === 'Tab') {
-        // Keep focus inside the dialog: Tab must not walk into the page
-        // behind it.
-        const root = dialogRef.current;
-        if (!root) return;
-        const focusable = Array.from(
-          root.querySelectorAll<HTMLElement>(
-            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          ),
-        ).filter((el) => el.offsetParent !== null || el === document.activeElement);
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        const active = document.activeElement as HTMLElement | null;
-        if (event.shiftKey && (active === first || !root.contains(active))) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && (active === last || !root.contains(active))) {
-          event.preventDefault();
-          first.focus();
-        }
       }
     };
     window.addEventListener('keydown', handleKey);
