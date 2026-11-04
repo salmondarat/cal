@@ -40,7 +40,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
   const [isPlaying, setIsPlaying] = useState(true);
   const [isMuted, setIsMuted] = useState(true);
   const [isLiked, setIsLiked] = useState(false);
-  const [likeCount, setLikeCount] = useState(post.metrics?.likes || 1240);
+  const [likeCount, setLikeCount] = useState(1240);
   const [isExpandedCaption, setIsExpandedCaption] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -123,7 +123,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
         {/* Dynamic Island Screen Header */}
         <div className="absolute top-4 left-1/2 -translate-x-1/2 w-24 h-6 bg-black rounded-full z-30 flex items-center justify-between px-2.5">
           <div className="w-2.5 h-2.5 rounded-full bg-neutral-800" />
-          <div className="w-2 h-2 rounded-full bg-[#1890ff]/60 animate-pulse" />
+          <div className="w-2 h-2 rounded-full bg-[#7c3aed]/60 animate-pulse" />
         </div>
 
         {/* Screen Status Bar */}
@@ -253,7 +253,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
                       <span
                         key={i}
                         className={`w-1.5 h-1.5 rounded-full ${
-                          i === carouselIndex ? 'bg-[#0000ee]' : 'bg-neutral-300'
+                          i === carouselIndex ? 'bg-[#6d28d9]' : 'bg-neutral-300'
                         }`}
                       />
                     ))}
@@ -285,7 +285,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
 
                 {/* Hashtags */}
                 {activeHashtags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 text-[10px] text-[#0000ee]">
+                  <div className="flex flex-wrap gap-1 text-[10px] text-[#6d28d9]">
                     {activeHashtags.map((tag, i) => (
                       <span key={i}>{tag}</span>
                     ))}
@@ -618,7 +618,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1 font-semibold text-neutral-900 text-xs">
                       <span>relatesales</span>
-                      <CheckCircle className="w-3 h-3 text-[#0000ee]" />
+                      <CheckCircle className="w-3 h-3 text-[#6d28d9]" />
                       <span className="text-neutral-400 font-normal text-[11px]">· {activeTime}</span>
                     </div>
                     <MoreHorizontal className="w-4 h-4 text-neutral-400" />
@@ -629,7 +629,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
                   </div>
 
                   {activeHashtags.length > 0 && (
-                    <div className="text-[11px] text-[#0000ee] mt-1 font-medium">
+                    <div className="text-[11px] text-[#6d28d9] mt-1 font-medium">
                       {activeHashtags.join(' ')}
                     </div>
                   )}

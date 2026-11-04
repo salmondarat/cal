@@ -205,6 +205,12 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     }
     setConnecting(platformId);
     setTestResult(null);
+    const group = CONNECTION_GROUP[platformId];
+    // Reconnecting must wait for a *new* consent, not the connection already on disk.
+    const before = await fetch('/api/connections')
+      .then((r) => r.json())
+      .then((conns) => (conns?.[group]?.connectedAt as string | undefined) ?? null)
+      .catch(() => null);
     const tab = window.open(oauthPath, '_blank');
     if (!tab) {
       setConnecting(null);
@@ -212,7 +218,6 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       return;
     }
 
-    const group = CONNECTION_GROUP[platformId];
     const started = Date.now();
     const finish = (success: boolean, message: string) => {
       if (pollTimerRef.current !== null) {
@@ -229,7 +234,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       } catch {
         return finish(false, 'We lost contact with the sign-in service. Make sure the local server is running, then try again.');
       }
-      if (conns[group]) {
+      if (conns[group] && conns[group].connectedAt !== before) {
         applyServerConnections(conns);
         return finish(true, `Live OAuth completed for ${conns[group].accountNames.join(', ')}.`);
       }
@@ -311,16 +316,16 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="relative w-full max-w-3xl bg-white rounded-[12px] shadow-2xl border border-neutral-200/80 overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-[rgba(15,23,42,0.34)] backdrop-blur-[2px] animate-in fade-in duration-200">
+      <div className="relative w-full max-w-3xl bg-white rounded-2xl shadow-[0_24px_64px_-16px_rgba(15,23,42,0.34)] border border-[#dde3ec] overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-neutral-50/70">
+        <div className="px-5 py-3.5 border-b border-neutral-200 flex items-center justify-between gap-4 bg-white">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-[8px] bg-[rgba(24,144,255,0.08)] border border-[rgba(24,144,255,0.2)] flex items-center justify-center text-[#0000ee]">
+            <div className="w-7 h-7 rounded-[8px] bg-[rgba(124,58,237,0.08)] border border-[rgba(124,58,237,0.2)] flex items-center justify-center text-[#6d28d9]">
               <Key className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-[#020520] leading-none">
+              <h3 className="text-sm font-semibold text-[#0f172a] leading-none">
                 Official Platform API & Connection Settings
               </h3>
               <p className="text-[11px] text-neutral-500 mt-0.5">
@@ -338,7 +343,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fcfcfc]">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 bg-[#fafbfd]">
           {/* Platform Navigation Tabs */}
           <div className="flex items-center gap-1.5 border-b border-neutral-200 pb-2 overflow-x-auto">
             {ALL_PLATFORM_IDS.map((pId) => {
@@ -355,7 +360,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   }}
                   className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-[8px] text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
                     isActive
-                      ? 'bg-[#020520] text-white shadow-xs'
+                      ? 'bg-[#0f172a] text-white shadow-xs'
                       : 'bg-white border border-neutral-200 text-neutral-600 hover:border-neutral-300'
                   }`}
                 >
@@ -377,7 +382,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
               <div className="flex items-center gap-2.5">
                 <PlatformIcon platform={activeTab} size={22} />
                 <div>
-                  <h4 className="text-sm font-semibold text-[#020520] leading-tight">
+                  <h4 className="text-sm font-semibold text-[#0f172a] leading-tight">
                     {pConfig.name} Integration
                   </h4>
                   <div className="flex items-center gap-2 text-[11px] text-neutral-500 font-mono mt-0.5">
@@ -415,7 +420,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                           <button
                             type="button"
                             onClick={() => handleActivateInstagram(acc.id)}
-                            className="text-[#0000ee] hover:underline cursor-pointer"
+                            className="text-[#6d28d9] hover:underline cursor-pointer"
                           >
                             Use
                           </button>
@@ -437,7 +442,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                         type="button"
                         disabled={connecting === 'instagram'}
                         onClick={() => handleConnect('instagram')}
-                        className="px-2.5 py-1 text-xs text-[#0000ee] hover:bg-blue-50 border border-blue-200 rounded-[6px] transition-colors font-medium disabled:opacity-50"
+                        className="px-2.5 py-1 text-xs text-[#6d28d9] hover:bg-[#f5f3ff] border border-[#ddd6fe] rounded-[6px] transition-colors font-medium disabled:opacity-50"
                       >
                         {connecting === 'instagram'
                           ? 'Waiting for Instagram approval...'
@@ -469,19 +474,30 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                     </div>
                   </div>
                 ) : currentCred.isConnected ? (
-                  <button
-                    type="button"
-                    onClick={() => handleDisconnect(activeTab)}
-                    className="px-2.5 py-1 text-xs text-red-600 hover:bg-red-50 border border-red-200 rounded-[6px] transition-colors"
-                  >
-                    Disconnect
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={connecting === activeTab}
+                      onClick={() => handleConnect(activeTab)}
+                      className="px-2.5 py-1 text-xs text-[#6d28d9] hover:bg-[#f5f3ff] border border-[#ddd6fe] rounded-[6px] transition-colors font-medium disabled:opacity-50"
+                      title="Reopen sign-in to grant newly added permissions; cancelling keeps the current token"
+                    >
+                      {connecting === activeTab ? 'Waiting for approval...' : 'Reconnect'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDisconnect(activeTab)}
+                      className="px-2.5 py-1 text-xs text-red-600 hover:bg-red-50 border border-red-200 rounded-[6px] transition-colors"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
                 ) : (
                   <button
                     type="button"
                     disabled={connecting === activeTab}
                     onClick={() => handleConnect(activeTab)}
-                    className="px-2.5 py-1 text-xs text-[#0000ee] hover:bg-blue-50 border border-blue-200 rounded-[6px] transition-colors font-medium disabled:opacity-50"
+                    className="px-2.5 py-1 text-xs text-[#6d28d9] hover:bg-[#f5f3ff] border border-[#ddd6fe] rounded-[6px] transition-colors font-medium disabled:opacity-50"
                   >
                     {connecting === activeTab
                       ? 'Waiting for OAuth approval...'
@@ -549,7 +565,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   <button
                     type="button"
                     onClick={() => toggleShowToken(`${activeTab}_token`)}
-                    className="text-[11px] text-[#0000ee] flex items-center gap-1 hover:underline cursor-pointer"
+                    className="text-[11px] text-[#6d28d9] flex items-center gap-1 hover:underline cursor-pointer"
                   >
                     {showTokens[`${activeTab}_token`] ? (
                       <>
@@ -571,7 +587,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                     readOnly
                     disabled
                     placeholder="Managed by the OAuth backend after Connect"
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono focus:outline-none focus:ring-1 focus:ring-[#0000ee] disabled:bg-neutral-50 disabled:text-neutral-500"
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-[8px] font-mono focus:outline-none focus:ring-1 focus:ring-[#6d28d9] disabled:bg-neutral-50 disabled:text-neutral-500"
                   />
                   <Lock className="w-3.5 h-3.5 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 </div>
@@ -586,7 +602,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   {currentCred.permissions.map((scope, idx) => (
                     <span
                       key={idx}
-                      className="px-2 py-0.5 text-[10px] font-mono text-[#0000ee] bg-blue-50/80 border border-blue-200/80 rounded-[4px]"
+                      className="px-2 py-0.5 text-[10px] font-mono text-[#6d28d9] bg-[#f5f3ff] border border-[#ddd6fe]/80 rounded-[4px]"
                     >
                       {scope}
                     </span>
@@ -596,7 +612,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
             </div>
 
             {/* Test Connection Button */}
-            <div className="pt-3 border-t border-[rgba(24,144,255,0.15)] flex items-center justify-between">
+            <div className="pt-3 border-t border-[rgba(124,58,237,0.15)] flex items-center justify-between">
               <span className="text-[11px] text-neutral-500">
                 Tokens live in the local OAuth backend (.secrets/connections.json) — the browser only sees a masked preview.
               </span>
@@ -605,7 +621,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                 type="button"
                 disabled={testingPlatform === activeTab}
                 onClick={() => handleTestConnection(activeTab)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#0000ee] hover:bg-[#0000cc] rounded-[8px] transition-colors shadow-xs cursor-pointer disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#6d28d9] hover:bg-[#5b21b6] rounded-[8px] transition-colors shadow-xs cursor-pointer disabled:opacity-50"
               >
                 {testingPlatform === activeTab ? (
                   <>
@@ -624,13 +640,13 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 border-t border-neutral-200 flex items-center justify-end bg-neutral-50/70">
+        <div className="px-5 py-3.5 border-t border-neutral-200 flex items-center justify-end bg-white">
           <button
             onClick={() => {
               onSaveCredentials?.(credentials);
               onClose();
             }}
-            className="px-4 py-1.5 text-xs font-semibold text-white bg-[#020520] hover:bg-[#0f1f3d] rounded-[8px] transition-colors shadow-xs cursor-pointer"
+            className="px-4 py-1.5 text-xs font-semibold text-white bg-[#0f172a] hover:bg-[#1e293b] rounded-[8px] transition-colors shadow-xs cursor-pointer"
           >
             Done
           </button>

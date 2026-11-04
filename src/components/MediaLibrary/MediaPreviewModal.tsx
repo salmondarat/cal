@@ -361,7 +361,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                       setUseRawSource(false);
                       setVideoReloadKey((n) => n + 1);
                     }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#020520] bg-white hover:bg-white/90 rounded-[6px]"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#0f172a] bg-white hover:bg-white/90 rounded-[6px]"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                     Retry
@@ -434,7 +434,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             {onSchedule && (
               <button
                 onClick={() => onSchedule(item)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#020520] bg-white hover:bg-white/90 rounded-[6px] transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#0f172a] bg-white hover:bg-white/90 rounded-[6px] transition-colors"
               >
                 {isVideo ? <Play className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
                 Schedule Post

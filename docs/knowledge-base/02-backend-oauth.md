@@ -85,12 +85,25 @@ Masking (`server.ts:80-83`): tokens ≤ 12 chars → first 3 + `...`; longer →
 | `GET /api/storage/media/file?date=&name=` | Stream a file | none |
 | `POST /api/storage/media?date=&name=` | Raw-body upload | none |
 | `DELETE /api/storage/media?date=&name=` | Delete a file | none |
+| `GET /api/public-media/:token` | HMAC-signed media link (6h) for Meta to download | signature |
+| `GET /api/posts` · `GET /api/posts/:id` | Server-side schedule with delivery state + warnings | none |
+| `PUT /api/posts/:id` | Create/update a post (status is only `draft` or `scheduled`) | none |
+| `POST /api/posts/sync` | Bulk-import posts from a browser's localStorage | none |
+| `DELETE /api/posts/:id` | Remove from the schedule (does not unpublish) | none |
+| `POST /api/posts/:id/publish` | Start a delivery job; replies `202`, poll the post | none |
+| `POST /api/posts/:id/validate` | Pre-flight checks without sending | none |
+| `POST /api/posts/:id/unpublish` | Delete published media from Instagram/Threads | none |
+| `GET /api/publish/log?limit=&postId=` | Tail of `logs/publish.jsonl` | none |
+| `GET /api/publish/readiness` | Public URL probe, scheduler config, connected accounts | none |
 
 Accepted `:platform` values for verify: `facebook`, `instagram`, `threads`,
 `tiktok`, `youtube`. For disconnect: `meta`, `instagram`, `threads`, `tiktok`,
 `youtube`.
 
-There is **no publish, schedule, queue, or job endpoint**.
+Delivery state lives in `<RELATE_DATA_DIR>/posts.json`; the scheduler ticks every
+`SCHEDULE_TICK_SECONDS` (20) and publishes posts whose `publishAt` has passed,
+unless they are more than `SCHEDULE_GRACE_MINUTES` (120) late — those are marked
+`failed`. `server.ts` groups all of this under `Publishing` section headers.
 
 `GET /api/health` shape:
 

@@ -69,6 +69,7 @@ export function libraryFileToMediaItem(root: Pick<LibraryRoot, 'id' | 'name'>, f
     serverManaged: true,
     libraryPath: file.path,
     libraryRoot: root.name,
+    libraryRootId: root.id,
   };
 }
 

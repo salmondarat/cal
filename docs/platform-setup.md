@@ -165,6 +165,25 @@ port, and browser shares one library:
 | `POST /api/verify/:platform` | real handshake (auto-refreshes tiktok/youtube/threads) |
 | `POST /api/disconnect/:platform` | `meta`, `threads`, `tiktok` or `youtube` |
 | `GET/POST/DELETE /api/storage/...` | universal media (see above) |
+| `GET/PUT/DELETE /api/posts[/:id]` | server-side schedule; `POST /api/posts/sync` imports a browser's localStorage posts |
+| `POST /api/posts/:id/publish` | start a delivery job (returns `202`, poll `GET /api/posts/:id`) |
+| `POST /api/posts/:id/validate` | pre-flight checks: media, public URL, account, caption length |
+| `POST /api/posts/:id/unpublish` | delete the published media from Instagram/Threads |
+| `GET /api/publish/log` · `GET /api/publish/readiness` | audit trail and scheduler/public-URL status |
+| `GET /api/public-media/:token` | HMAC-signed, 6h media link Meta downloads from |
+
+## Publishing checklist
+
+1. The backend must be running (`pnpm dev:server`) — the scheduler lives there,
+   not in the browser.
+2. `APP_URL` (or `PUBLIC_MEDIA_BASE_URL`) must be a public HTTPS host that routes
+   back to this machine. With the Cloudflare tunnel:
+   `cloudflared tunnel run <name>` (or the Windows scheduled task that starts
+   it), ingress pointing at `http://localhost:3000`.
+3. The file must be in shared media storage or a scanned library root —
+   Manage posts → **Check** proves Meta can download it before anything is sent.
+4. Instagram needs the *Instagram API with Instagram Login* app to hold approved
+   Content Publishing access, and the account must be reachable by that app.
 
 ## Troubleshooting
 
@@ -181,3 +200,19 @@ port, and browser shares one library:
   app permissions) — reconnect; FB/IG tokens are not auto-refreshed by design.
 - **`invalid_rapt`** (Google, Workspace accounts): admin must approve the OAuth
   app; otherwise reconnect from a personal account.
+- **Publish fails with "your public address is not reachable (Cloudflare error
+  530)"**: the tunnel connector is down or stale. A `cloudflared` process can sit
+  connected to nothing — kill it and start the scheduled task again
+  (`schtasks /run /tn "Cloudflared relate-social"`), then re-run
+  Manage posts → Check. `GET /api/publish/readiness` shows the same verdict.
+- **`API access blocked.` (Graph code 200) on every call, including a plain
+  profile read**: Meta is refusing this app↔account pair, before your request
+  reaches any publishing logic. Confirm with `POST /api/verify/instagram` — if
+  even `/me` fails, the fix is on the Meta side: check App Dashboard →
+  Instagram API with Instagram Login → use-case access level (Standard Access
+  only allows accounts holding an Admin/Developer/Tester role in the app;
+  publishing for everyone needs Advanced Access review), check Business Support
+  Home for an enforcement flag on the account, and reconnect to get a fresh
+  token. Quote the `fbtrace_id` recorded in `logs/publish.jsonl` when reporting
+  it — several developers reported this appearing suddenly in October 2026 with
+  no code change.

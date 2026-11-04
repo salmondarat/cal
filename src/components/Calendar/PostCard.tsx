@@ -4,33 +4,111 @@ import {
   Smartphone,
   Edit2,
   Trash2,
-  Play,
   Layers,
   Image as ImageIcon,
-  MoreVertical,
-  CheckCircle,
+  Film,
+  Send,
+  RotateCw,
+  Loader2,
+  AlertCircle,
+  History,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { ScheduledPost } from '../../types';
-import { PlatformIcon } from '../PlatformIcon';
-import { formatBytes } from '../../utils/mediaUtils';
+import { PLATFORMS } from '../../constants/platforms';
+import { fetchPublishLog } from '../../utils/postApi';
+import { friendlyErrorTitle, explainError } from '../../utils/explainError';
 
 interface PostCardProps {
   post: ScheduledPost;
   onPreview: (post: ScheduledPost) => void;
   onEdit: (post: ScheduledPost) => void;
   onDelete: (postId: string) => void;
+  onOpenDetail?: (post: ScheduledPost) => void;
+  onPublish?: (post: ScheduledPost) => void;
   compact?: boolean;
+  dense?: boolean;
 }
+
+const STATUS_LOOK: Record<string, { label: string; className: string }> = {
+  draft: {
+    label: 'Draft',
+    className: 'bg-white/75 text-slate-600 border-slate-300/70',
+  },
+  scheduled: {
+    label: 'Scheduled',
+    className: 'bg-[#f5f3ff] text-[#5b21b6] border-[#ddd6fe]',
+  },
+  publishing: {
+    label: 'Sending',
+    className: 'bg-amber-50 text-amber-700 border-amber-200',
+  },
+  published: {
+    label: 'Published',
+    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  },
+  partial: {
+    label: 'Partial',
+    className: 'bg-amber-50 text-amber-700 border-amber-200',
+  },
+  failed: {
+    label: 'Failed',
+    className: 'bg-red-50 text-red-700 border-red-200',
+  },
+};
 
 export const PostCard: React.FC<PostCardProps> = ({
   post,
   onPreview,
   onEdit,
   onDelete,
+  onOpenDetail,
+  onPublish,
   compact = false,
+  dense = false,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [showMenu, setShowMenu] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+
+  // Copies this card's delivery result plus its backend trail, ready to paste
+  // into a support ticket.
+  const copyTrail = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCopyState('busy');
+    try {
+      let entries: unknown[] = [];
+      try {
+        entries = (await fetchPublishLog(50, post.id)).entries;
+      } catch {}
+      const payload = {
+        post: {
+          id: post.id,
+          title: post.title,
+          status: post.status,
+          scheduledDate: post.scheduledDate,
+          scheduledTime: post.scheduledTime,
+          timezone: post.timezone,
+          publishAt: post.publishAt,
+          attempts: post.attempts,
+          nextTryAt: post.nextTryAt,
+          lastError: post.lastError,
+          format: post.format,
+          platforms: post.platforms,
+          platformAccounts: post.platformAccounts,
+          media: post.media.map((m) => ({ name: m.name, type: m.type, size: m.size, folderDate: m.folderDate })),
+          results: post.results,
+        },
+        log: entries,
+      };
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      setCopyState('done');
+      setTimeout(() => setCopyState('idle'), 1800);
+    } catch {
+      setCopyState('error');
+      setTimeout(() => setCopyState('idle'), 2500);
+    }
+  };
 
   const handleDragStart = (e: React.DragEvent) => {
     setIsDragging(true);
@@ -45,152 +123,235 @@ export const PostCard: React.FC<PostCardProps> = ({
     setIsDragging(false);
   };
 
-  const firstMedia = post.media[0];
-  const isVideo = post.format === 'video';
-  const isCarousel = post.format === 'carousel';
+  const primaryPlatform = PLATFORMS[post.platforms[0]];
+  const status = STATUS_LOOK[post.status] || STATUS_LOOK.draft;
+  const isPublishing = post.status === 'publishing';
+  const canPublish = Boolean(onPublish) && !isPublishing && post.status !== 'published';
+  const deliveredCount = Object.values(post.results || {}).filter(
+    (r) => r.status === 'success' && !r.deletedAt,
+  ).length;
+  const channelNames = post.platforms.map((id) => PLATFORMS[id].name).join(', ');
+  const isAttention = post.status === 'failed' || post.status === 'partial';
+
+  const dragProps = {
+    draggable: true,
+    onDragStart: handleDragStart,
+    onDragEnd: handleDragEnd,
+  };
+
+  const tint = {
+    background: primaryPlatform?.accentBg || '#fafbfd',
+    borderColor: primaryPlatform?.badgeBorder || '#e8ecf2',
+  };
+
+  if (compact) {
+    return (
+      <div
+        {...dragProps}
+        onClick={() => onOpenDetail?.(post)}
+        title={`${post.scheduledTime} · ${post.title} · ${channelNames}`}
+        className={`group flex cursor-pointer items-center gap-1.5 overflow-hidden rounded-[7px] border px-1.5 py-1 text-[9.5px] font-semibold transition-all hover:shadow-[0_2px_8px_rgba(15,23,42,0.1)] ${
+          isDragging ? 'opacity-40' : ''
+        }`}
+        style={{ ...tint, color: '#0f172a' }}
+      >
+        <span className="shrink-0 tabular-nums text-[#334155]">{post.scheduledTime}</span>
+        <span className="min-w-0 flex-1 truncate">{post.title}</span>
+        {isAttention && (
+          <span
+            className="shrink-0 rounded-[3px] border border-red-200 bg-red-50 px-1 text-[8px] font-extrabold leading-[1.4] text-[#b91c1c]"
+            title={explainError(post.lastError)?.message || 'Needs attention'}
+          >
+            !
+          </span>
+        )}
+        {post.status === 'draft' && (
+          <span className="shrink-0 text-[8px] font-bold uppercase tracking-wide text-[#5b6a80]">
+            draft
+          </span>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
-      draggable
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      className={`group relative rounded-[8px] transition-all duration-150 cursor-grab active:cursor-grabbing select-none ${
+      {...dragProps}
+      onClick={() => onOpenDetail?.(post)}
+      title={onOpenDetail ? 'Open details: delivery result and activity trail' : undefined}
+      className={`group relative select-none overflow-hidden rounded-[10px] border text-left transition-all duration-150 ${
+        onOpenDetail ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'
+      } ${
         isDragging
-          ? 'opacity-40 scale-95 border-2 border-dashed border-[#0000ee]'
-          : 'bg-[rgba(24,144,255,0.05)] border border-[rgba(24,144,255,0.2)] hover:border-[rgba(24,144,255,0.45)] hover:shadow-[0_2px_8px_-2px_rgba(24,144,255,0.25)]'
-      } ${compact ? 'p-1.5 mb-1.5' : 'p-2.5 mb-2'}`}
-      style={{
-        boxShadow: isDragging ? 'none' : 'rgba(0, 0, 0, 0.08) 0px 1px 3px -1px',
-      }}
+          ? 'scale-[0.98] border-2 border-dashed border-[#6d28d9] opacity-40'
+          : 'hover:-translate-y-px hover:shadow-[0_3px_10px_rgba(15,23,42,0.1)]'
+      } ${dense ? 'px-1.5 py-1' : 'px-2 py-1.5'}`}
+      style={tint}
     >
-      {/* Top Row: Time, Platform Icons & Action Controls */}
-      <div className="flex items-center justify-between gap-1 mb-1.5">
-        {/* Scheduled Time */}
-        <div className="flex items-center gap-1 text-[11px] font-mono font-medium text-neutral-700 tabular-nums">
-          <Clock className="w-3 h-3 text-[#0000ee]" />
-          <span>{post.scheduledTime}</span>
-          {post.status === 'published' && (
-            <span className="inline-flex items-center text-emerald-600 text-[10px]" title="Published">
-              <CheckCircle className="w-2.5 h-2.5" />
-            </span>
-          )}
-        </div>
-
-        {/* Platform Icons */}
-        <div className="flex items-center -space-x-1">
-          {post.platforms.map((pId) => (
-            <div
-              key={pId}
-              className="w-4 h-4 rounded-full bg-white ring-1 ring-neutral-200 flex items-center justify-center shadow-2xs overflow-hidden"
-              title={pId}
-            >
-              <PlatformIcon platform={pId} size={11} />
-            </div>
-          ))}
-        </div>
+      <div className="flex items-center gap-1.5">
+        <span
+          className="flex items-center gap-1 text-[10px] font-bold tabular-nums"
+          style={{ color: primaryPlatform?.textColor || '#334155' }}
+        >
+          <Clock className="h-2.5 w-2.5" />
+          {post.scheduledTime}
+        </span>
+        <span
+          className={`ml-auto inline-flex items-center gap-1 rounded-[4px] border px-1 py-px text-[8px] font-bold uppercase tracking-[0.04em] ${status.className}`}
+          title={explainError(post.lastError)?.message || `${status.label} for ${channelNames}`}
+        >
+          {isPublishing && <Loader2 className="h-2 w-2 animate-spin" />}
+          {status.label}
+        </span>
       </div>
 
-      {/* Media Thumbnail + Title Preview */}
-      <div className="flex items-start gap-2">
-        {firstMedia && (
-          <div className="relative w-10 h-10 shrink-0 rounded-[6px] overflow-hidden bg-neutral-200 border border-neutral-200/80">
-            {isVideo ? (
-              <div className="w-full h-full relative bg-neutral-900 flex items-center justify-center">
-                <video
-                  src={firstMedia.url}
-                  className="w-full h-full object-cover pointer-events-none opacity-80"
-                  muted
-                  playsInline
-                />
-                <div className="absolute inset-0 bg-black/25 flex items-center justify-center">
-                  <Play className="w-3.5 h-3.5 text-white fill-white" />
-                </div>
-              </div>
-            ) : (
-              <img
-                src={firstMedia.url}
-                alt={post.title}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
-              />
-            )}
+      <h4
+        className={`mt-0.5 font-semibold leading-[1.25] text-[#0f172a] ${
+          dense ? 'line-clamp-2 text-[10.5px]' : 'line-clamp-2 text-[11.5px]'
+        }`}
+      >
+        {post.title}
+      </h4>
 
-            {/* Media Type Badge */}
-            <div className="absolute bottom-0 right-0 px-1 bg-black/70 text-[9px] font-mono text-white flex items-center rounded-tl-[3px]">
-              {isVideo ? (
-                <span>{firstMedia.duration ? `${firstMedia.duration}s` : 'VID'}</span>
-              ) : isCarousel ? (
-                <div className="flex items-center gap-0.5">
-                  <Layers className="w-2 h-2" />
-                  <span>{post.media.length}</span>
-                </div>
-              ) : (
-                <ImageIcon className="w-2 h-2" />
-              )}
-            </div>
-          </div>
-        )}
+      {!dense && (
+        <p className="mt-0.5 line-clamp-1 text-[10.5px] leading-snug text-[#334155]/90">
+          {post.baseCaption}
+        </p>
+      )}
 
-        <div className="flex-1 min-w-0">
-          <h4 className="text-xs font-semibold text-[#0f1f3d] truncate leading-tight">
-            {post.title}
-          </h4>
-          <p className="text-[11px] text-neutral-500 line-clamp-1 mt-0.5 leading-snug">
-            {post.baseCaption}
-          </p>
-        </div>
-      </div>
-
-      {/* Hashtag Preview (if non-compact) */}
-      {!compact && post.baseHashtags.length > 0 && (
-        <div className="mt-1.5 flex items-center gap-1 overflow-hidden text-[10px] text-[#0000ee] font-mono truncate">
-          {post.baseHashtags.slice(0, 3).map((tag, i) => (
-            <span key={i} className="hover:underline">
-              {tag}
-            </span>
-          ))}
-          {post.baseHashtags.length > 3 && (
-            <span className="text-neutral-400">+{post.baseHashtags.length - 3}</span>
-          )}
+      {isAttention && !dense && (
+        <div
+          className="mt-1 flex items-start gap-1 rounded-[5px] border border-red-100 bg-red-50/80 px-1 py-0.5 text-[9.5px] leading-snug text-red-700"
+          title={explainError(post.lastError)?.message || post.lastError}
+        >
+          <AlertCircle className="mt-px h-2.5 w-2.5 shrink-0" />
+          <span className="line-clamp-2 break-words">
+            {friendlyErrorTitle(post.lastError) || post.lastError}
+          </span>
         </div>
       )}
 
-      {/* Hover Quick Action Strip */}
-      <div className="mt-2 pt-1.5 border-t border-[rgba(24,144,255,0.15)] flex items-center justify-between gap-1 opacity-90 group-hover:opacity-100 transition-opacity">
+      <div className="mt-1 flex min-w-0 items-center gap-1 text-[9px] text-[#334155]/85">
+        <span className="flex items-center gap-0.5" aria-hidden="true">
+          {post.platforms.slice(0, 3).map((platformId, index) => (
+            <span
+              key={platformId}
+              className="h-[6px] w-[6px] rounded-full"
+              style={{
+                background: PLATFORMS[platformId].ringColor,
+                marginLeft: index === 0 ? 0 : -2,
+                boxShadow: '0 0 0 1px rgba(255,255,255,0.85)',
+              }}
+            />
+          ))}
+          {post.platforms.length > 3 && <span>+{post.platforms.length - 3}</span>}
+        </span>
+        <span className="min-w-0 truncate">{channelNames}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1 text-[#5b6a80]">
+          {post.format === 'video' ? (
+            <Film className="h-2.5 w-2.5" />
+          ) : post.format === 'carousel' ? (
+            <Layers className="h-2.5 w-2.5" />
+          ) : (
+            <ImageIcon className="h-2.5 w-2.5" />
+          )}
+          {post.media.length > 1 && <span className="tabular-nums">{post.media.length}</span>}
+        </span>
+      </div>
+
+      {/* Hover actions: overlay so the card never grows and slots never shift */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-0.5 border-t border-black/5 bg-white/95 px-1 py-1 opacity-0 backdrop-blur-[2px] transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
         <button
+          type="button"
           onClick={(e) => {
             e.stopPropagation();
             onPreview(post);
           }}
-          className="inline-flex items-center gap-1 text-[11px] font-medium text-[#0000ee] hover:text-[#0000aa] transition-colors cursor-pointer"
-          title="Preview in Mobile Simulator"
+          className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[9.5px] font-semibold text-[#6d28d9] hover:bg-[#f5f3ff]"
+          title="Preview in the device simulator"
         >
-          <Smartphone className="w-3 h-3" />
-          <span>Preview</span>
+          <Smartphone className="h-2.5 w-2.5" />
+          Preview
         </button>
-
-        <div className="flex items-center gap-1">
+        {onOpenDetail && (
           <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenDetail(post);
+            }}
+            className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[9.5px] font-semibold text-[#334155] hover:bg-[#f4f6f9]"
+            title="Delivery result and activity trail"
+          >
+            <History className="h-2.5 w-2.5" />
+            Details
+          </button>
+        )}
+
+        <span className="ml-auto flex items-center gap-0.5">
+          {canPublish && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onPublish?.(post);
+              }}
+              className="inline-flex items-center gap-0.5 rounded bg-[#0f172a] px-1 py-0.5 text-[9.5px] font-semibold text-white hover:bg-black"
+              title={
+                post.status === 'draft'
+                  ? 'Publish now'
+                  : deliveredCount
+                    ? 'Publish again'
+                    : 'Send now instead of waiting'
+              }
+            >
+              {isAttention ? <RotateCw className="h-2.5 w-2.5" /> : <Send className="h-2.5 w-2.5" />}
+              {isAttention ? 'Retry' : 'Send'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => void copyTrail(e)}
+            className="grid h-4 w-4 place-items-center rounded text-[#94a3b8] hover:bg-[#f4f6f9] hover:text-[#334155]"
+            title={
+              copyState === 'done'
+                ? 'Trail copied'
+                : copyState === 'error'
+                  ? 'The clipboard is not available'
+                  : 'Copy delivery result and error trail (JSON)'
+            }
+          >
+            {copyState === 'busy' ? (
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            ) : copyState === 'done' ? (
+              <Check className="h-2.5 w-2.5 text-emerald-600" />
+            ) : (
+              <Copy className="h-2.5 w-2.5" />
+            )}
+          </button>
+          <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onEdit(post);
             }}
-            className="p-1 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-[4px] transition-colors cursor-pointer"
-            title="Edit Post"
+            className="grid h-4 w-4 place-items-center rounded text-[#94a3b8] hover:bg-[#f4f6f9] hover:text-[#334155]"
+            title="Edit post"
           >
-            <Edit2 className="w-3 h-3" />
+            <Edit2 className="h-2.5 w-2.5" />
           </button>
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onDelete(post.id);
             }}
-            className="p-1 text-neutral-400 hover:text-red-600 hover:bg-red-50 rounded-[4px] transition-colors cursor-pointer"
-            title="Delete Post"
+            className="grid h-4 w-4 place-items-center rounded text-[#94a3b8] hover:bg-red-50 hover:text-red-600"
+            title="Delete post"
           >
-            <Trash2 className="w-3 h-3" />
+            <Trash2 className="h-2.5 w-2.5" />
           </button>
-        </div>
+        </span>
       </div>
     </div>
   );
