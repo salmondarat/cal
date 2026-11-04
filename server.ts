@@ -1633,7 +1633,35 @@ function listFolderListing(target: string): ServerFolderListing {
   };
 }
 
+// Read env at call time so a test can flip a flag between requests.
+function browseEnabled(): boolean { return process.env.MEDIA_BROWSE !== '0'; }
+function browseRemoteAllowed(): boolean { return process.env.MEDIA_BROWSE_REMOTE === '1'; }
+
+function isLocalRequest(req: express.Request): boolean {
+  const host = String(req.headers.host || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (!['localhost', '127.0.0.1', '::1'].includes(host)) return false;
+  if (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.headers['x-real-ip']) return false;
+  const origin = req.headers.origin;
+  if (origin) {
+    try {
+      const originHost = new URL(origin).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+      if (!['localhost', '127.0.0.1', '::1'].includes(originHost)) return false;
+    } catch { return false; }
+  }
+  return true;
+}
+
+function browseGuard(req: express.Request): string | null {
+  if (!browseEnabled()) return 'Folder browsing is turned off on this computer. Paste the folder path instead.';
+  if (!browseRemoteAllowed() && !isLocalRequest(req)) {
+    return 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.';
+  }
+  return null;
+}
+
 app.get('/api/fs/dirs', (req, res) => {
+  const blocked = browseGuard(req);
+  if (blocked) return res.status(403).json({ error: blocked });
   try {
     const raw = typeof req.query.path === 'string' ? req.query.path : '';
     const roots = browseRoots();

@@ -1,9 +1,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 
-const TMP_BASE = fs.existsSync('/tmp/opencode') ? '/tmp/opencode' : require('node:os').tmpdir();
+const TMP_BASE = fs.existsSync('/tmp/opencode') ? '/tmp/opencode' : os.tmpdir();
 fs.mkdirSync(TMP_BASE, { recursive: true });
 const ROOT = fs.mkdtempSync(path.join(TMP_BASE, 'cal-fs-'));
 process.env.MEDIA_NO_LISTEN = '1';
@@ -100,4 +102,42 @@ test('MEDIA_BROWSE_ROOTS replaces the defaults and never yields the cwd', async 
   const { body } = await get('/api/fs/dirs');
   assert.deepEqual(body.places.map((p: any) => p.path), [ROOT]);
   assert.ok(!body.places.some((p: any) => p.path === process.cwd()));
+});
+
+// `fetch` silently drops a custom Host header (forbidden header name), so the
+// remote gate can only be exercised through node:http.
+function getWithHost(path: string, host: string): Promise<{ status: number; body: any }> {
+  const port = new URL(base).port;
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, headers: { Host: host } }, (res) => {
+      let d = '';
+      res.on('data', (c) => { d += c; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: JSON.parse(d || '{}') }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('refuses to browse when MEDIA_BROWSE is off', async () => {
+  process.env.MEDIA_BROWSE = '0';
+  const { status, body } = await get('/api/fs/dirs');
+  assert.equal(status, 403);
+  assert.equal(body.error, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
+  process.env.MEDIA_BROWSE = '1';
+});
+
+test('refuses a remote host when MEDIA_BROWSE_REMOTE is off', async () => {
+  process.env.MEDIA_BROWSE_REMOTE = '0';
+  const { status, body } = await getWithHost('/api/fs/dirs', 'example.com');
+  assert.equal(status, 403);
+  assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+  process.env.MEDIA_BROWSE_REMOTE = '1';
+});
+
+test('allows a loopback host even when remote browsing is off', async () => {
+  process.env.MEDIA_BROWSE_REMOTE = '0';
+  const { status } = await getWithHost('/api/fs/dirs', 'localhost');
+  assert.equal(status, 200);
+  process.env.MEDIA_BROWSE_REMOTE = '1';
 });
