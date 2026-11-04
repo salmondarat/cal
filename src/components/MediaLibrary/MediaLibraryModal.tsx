@@ -1120,14 +1120,12 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
         )}
       </div>
 
-      {isBrowsingFolders && (
-        <FolderBrowserModal
-          isOpen={isBrowsingFolders}
-          initialPath={newRootPath.trim() || undefined}
-          onClose={() => setIsBrowsingFolders(false)}
-          onSelect={handleFolderSelected}
-        />
-      )}
+      <FolderBrowserModal
+        isOpen={isBrowsingFolders}
+        initialPath={newRootPath.trim() || undefined}
+        onClose={() => setIsBrowsingFolders(false)}
+        onSelect={handleFolderSelected}
+      />
 
       {previewState && (
         <MediaPreviewModal

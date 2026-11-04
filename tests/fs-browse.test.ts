@@ -279,6 +279,7 @@ test('places never offer hidden folders or filesystem artifacts', async () => {
     assert.ok(!names.some((n: string) => n.startsWith('.')), `hidden place offered: ${names.join(', ')}`);
     assert.ok(!names.some((n: string) => n.toLowerCase() === '$recycle.bin'), `$RECYCLE.BIN offered: ${names.join(', ')}`);
     assert.ok(!names.some((n: string) => n.toLowerCase() === 'lost+found'), `lost+found offered: ${names.join(', ')}`);
+    assert.ok(!names.some((n: string) => n.toLowerCase() === 'system volume information'), `System Volume Information offered: ${names.join(', ')}`);
   } finally {
     restoreEnv('MEDIA_BROWSE_ROOTS', previous);
   }
@@ -300,6 +301,8 @@ test('every offered volume is a real mount point', async () => {
         .filter(Boolean)
         .map((point) => point!.replace(/\\040/g, ' ')),
     );
+    const mediaMounts = [...mounts].filter((point) => /^\/(media|mnt|run\/media)\/.+/.test(point));
+    if (mediaMounts.length === 0) return; // this machine has no mounted volume to check
     const { body } = await get('/api/fs/dirs');
     const volumes = body.places.filter((p: any) => p.kind === 'volume');
     assert.ok(volumes.length > 0, 'this machine has at least one mounted volume');

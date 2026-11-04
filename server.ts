@@ -1517,7 +1517,9 @@ function linuxMountPoints(): string[] {
       const mountPoint = fields[1];
       if (!mountPoint) continue;
       const decoded = mountPoint.replace(/\\040/g, ' ');
-      if (!/^\/(media|mnt|run\/media)(\/|$)/.test(decoded)) continue;
+      // A child segment is required: systemd mounts a tmpfs on /run/media on
+      // some systems, and the media roots themselves are not volumes.
+      if (!/^\/(media|mnt|run\/media)\/.+/.test(decoded)) continue;
       points.push(decoded);
     }
     return points;

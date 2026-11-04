@@ -37,16 +37,23 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   const [placesOpen, setPlacesOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const requestIdRef = useRef(0);
 
   const open = useCallback(async (path?: string, silentFallback = false) => {
+    // A request id, so a slow response cannot overwrite a newer navigation:
+    // double-clicking two folders in quick succession must not leave the
+    // listing showing the one the user already navigated away from.
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const next = await listServerFolders(path);
+      if (requestId !== requestIdRef.current) return;
       setListing(next);
       setHighlight(0);
       listRef.current?.focus();
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       if (!silentFallback) {
         setError(toUserMessage(err, 'That folder could not be opened. Please try again.'));
         return;
@@ -55,14 +62,16 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       // Start at the server's first browse root instead of showing an error.
       try {
         const next = await listServerFolders();
+        if (requestId !== requestIdRef.current) return;
         setListing(next);
         setHighlight(0);
         listRef.current?.focus();
       } catch (fallbackErr) {
+        if (requestId !== requestIdRef.current) return;
         setError(toUserMessage(fallbackErr, 'That folder could not be opened. Please try again.'));
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, []);
 
@@ -115,6 +124,10 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
         setHighlight((h) => Math.max(h - 1, 0));
         event.preventDefault();
       } else if (event.key === 'Enter') {
+        // preventDefault, or a focused button would ALSO be activated by the
+        // browser's default key handling — Enter on "Use this folder" would
+        // both pick the current folder and open the highlighted subfolder.
+        event.preventDefault();
         enter(listing?.entries[highlight]);
       } else if (event.key === 'Backspace') {
         // Backspace would otherwise leave the page in some browsers.
