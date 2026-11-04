@@ -21,7 +21,7 @@ import {
   CornerDownRight,
   Maximize2,
 } from 'lucide-react';
-import { LibraryFolder, LibraryListing, LibraryRoot, MediaItem } from '../../types';
+import { LibraryFolder, LibraryListing, LibraryRoot, MediaItem, FolderPickerCapability } from '../../types';
 import { formatBytes, validateFileSize, processFileToMediaItem } from '../../utils/mediaUtils';
 import { toUserMessage } from '../../utils/errorMessages';
 import { MediaThumb } from './MediaThumb';
@@ -34,6 +34,7 @@ import {
 } from '../../utils/mediaStorage';
 import {
   addLibraryRoot,
+  getFolderPickerCapability,
   getLibraryRoots,
   joinLibraryPath,
   libraryFileToMediaItem,
@@ -42,6 +43,7 @@ import {
   removeLibraryRoot,
   splitLibraryPath,
 } from '../../utils/localLibrary';
+import { FolderBrowserModal } from './FolderBrowserModal';
 
 interface MediaLibraryModalProps {
   isOpen: boolean;
@@ -83,6 +85,8 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   const [newRootPath, setNewRootPath] = useState('');
   const [isAddingRoot, setIsAddingRoot] = useState(false);
   const [isPickingFolder, setIsPickingFolder] = useState(false);
+  const [isBrowsingFolders, setIsBrowsingFolders] = useState(false);
+  const [pickerCapability, setPickerCapability] = useState<FolderPickerCapability | null>(null);
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
   const [currentPath, setCurrentPath] = useState('');
   const [listing, setListing] = useState<LibraryListing | null>(null);
@@ -115,6 +119,28 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
     if (!isOpen || rootsLoadedRef.current) return;
     rootsLoadedRef.current = true;
     loadRoots();
+  }, [isOpen]);
+
+  // The native dialog opens on the machine running the app, not on the one
+  // showing this page. Only offer it when this page IS that machine.
+  const isLocalHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(window.location.hostname);
+
+  // Ask the server whether this computer has a native folder dialog. The
+  // answer decides whether the "Use system dialog" button is worth showing.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    getFolderPickerCapability()
+      .then((capability) => {
+        if (!cancelled) setPickerCapability(capability);
+      })
+      .catch(() => {
+        // A failed probe just means no system dialog is offered.
+        if (!cancelled) setPickerCapability(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -239,6 +265,19 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
       setLibraryError(toUserMessage(err, 'The folder picker could not open. Paste the folder path instead.'));
     } finally {
       setIsPickingFolder(false);
+    }
+  };
+
+  // A folder chosen in the server-side browser. The path is already a real
+  // folder on the server, so it is registered the same way a pasted path is.
+  const handleFolderSelected = async (path: string) => {
+    setIsBrowsingFolders(false);
+    setLibraryError(null);
+    try {
+      await registerRoot(path);
+      setNewRootPath('');
+    } catch (err) {
+      setLibraryError(toUserMessage(err, 'That folder could not be added. Please try again.'));
     }
   };
 
@@ -791,23 +830,34 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
                   </div>
                   <button
                     type="button"
-                    onClick={handleBrowseFolder}
-                    disabled={isPickingFolder}
+                    onClick={() => setIsBrowsingFolders(true)}
                     className="mt-1 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] font-medium text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50 border border-neutral-200 rounded-[6px] transition-colors"
-                    title="Open the system folder picker"
+                    title="Browse the folders on this computer"
                   >
-                    {isPickingFolder ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        Choosing folder...
-                      </>
-                    ) : (
-                      <>
-                        <FolderOpen className="w-3.5 h-3.5" />
-                        Browse folder...
-                      </>
-                    )}
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    Browse folders...
                   </button>
+                  {pickerCapability?.available && isLocalHost && (
+                    <button
+                      type="button"
+                      onClick={handleBrowseFolder}
+                      disabled={isPickingFolder}
+                      className="mt-1 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] font-medium text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50 border border-neutral-200 rounded-[6px] transition-colors"
+                      title="Open the system folder picker on this computer"
+                    >
+                      {isPickingFolder ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          Choosing folder...
+                        </>
+                      ) : (
+                        <>
+                          <FolderOpen className="w-3.5 h-3.5" />
+                          Use system dialog
+                        </>
+                      )}
+                    </button>
+                  )}
                   <p className="text-[10px] text-neutral-400 mt-1">
                     Browse or paste a full path. Files stay in place — nothing is copied.
                   </p>
@@ -1069,6 +1119,15 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
           </>
         )}
       </div>
+
+      {isBrowsingFolders && (
+        <FolderBrowserModal
+          isOpen={isBrowsingFolders}
+          initialPath={newRootPath.trim() || undefined}
+          onClose={() => setIsBrowsingFolders(false)}
+          onSelect={handleFolderSelected}
+        />
+      )}
 
       {previewState && (
         <MediaPreviewModal
