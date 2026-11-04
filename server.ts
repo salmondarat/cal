@@ -1446,6 +1446,208 @@ function libraryMime(name: string): string | null {
   return LIBRARY_MEDIA_EXT.has(ext) ? LIBRARY_MIME[ext] || 'application/octet-stream' : null;
 }
 
+// ---------- Server-side folder browsing (browse roots + GET /api/fs/dirs) ----------
+
+interface BrowseRoot {
+  name: string;
+  path: string;
+  kind: 'home' | 'volume' | 'custom';
+}
+
+interface FolderEntry {
+  name: string;
+  path: string;
+}
+
+interface ServerFolderListing {
+  path: string;
+  name: string;
+  parent: string | null;
+  isRoot: boolean;
+  limit: number;
+  places: BrowseRoot[];
+  entries: FolderEntry[];
+  truncated: boolean;
+}
+
+const FS_LIST_LIMIT = () => Math.max(1, Number(process.env.FS_LIST_LIMIT || 1000));
+
+function browseError(statusCode: number, message: string): Error {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function existingDirectory(candidate: string): string | null {
+  try {
+    return fs.statSync(candidate).isDirectory() ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function childDirectories(dir: string): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const children: string[] = [];
+  for (const name of names) {
+    const child = existingDirectory(path.join(dir, name));
+    if (child) children.push(child);
+  }
+  return children;
+}
+
+// Read at call time so a test can flip MEDIA_BROWSE_ROOTS between requests.
+function browseRoots(): BrowseRoot[] {
+  const configured = process.env.MEDIA_BROWSE_ROOTS;
+  if (configured && configured.trim()) {
+    const roots: BrowseRoot[] = [];
+    const seen = new Set<string>();
+    for (const segment of configured.split(path.delimiter)) {
+      if (!segment.trim()) continue;
+      const resolved = expandUserPath(segment);
+      if (seen.has(resolved) || !existingDirectory(resolved)) continue;
+      seen.add(resolved);
+      roots.push({ name: path.basename(resolved) || resolved, path: resolved, kind: 'custom' });
+    }
+    return roots;
+  }
+
+  const roots: BrowseRoot[] = [{ name: 'Home', path: os.homedir(), kind: 'home' }];
+  const seen = new Set<string>([roots[0].path]);
+  const addVolume = (volumePath: string) => {
+    if (seen.has(volumePath) || !existingDirectory(volumePath)) return;
+    seen.add(volumePath);
+    roots.push({ name: path.basename(volumePath) || volumePath, path: volumePath, kind: 'volume' });
+  };
+
+  if (process.platform === 'win32') {
+    for (let code = 'A'.charCodeAt(0); code <= 'Z'.charCodeAt(0); code++) {
+      const letter = String.fromCharCode(code);
+      const drive = `${letter}:\\`;
+      if (existingDirectory(drive)) roots.push({ name: `${letter}:`, path: drive, kind: 'volume' });
+    }
+  } else if (process.platform === 'darwin') {
+    for (const volume of childDirectories('/Volumes')) addVolume(volume);
+  } else {
+    for (const base of ['/media', '/mnt', '/run/media']) {
+      for (const volume of childDirectories(base)) {
+        addVolume(volume);
+        for (const nested of childDirectories(volume)) addVolume(nested);
+      }
+    }
+  }
+  return roots;
+}
+
+function normalizePath(p: string): string {
+  return process.platform === 'win32' ? p.toLowerCase() : p;
+}
+
+// Cheap text containment check: works for paths that do not exist yet.
+function isPathInside(candidate: string, roots: BrowseRoot[]): boolean {
+  const target = normalizePath(path.resolve(candidate));
+  return roots.some((root) => {
+    const base = normalizePath(path.resolve(root.path));
+    return target === base || target.startsWith(base + path.sep);
+  });
+}
+
+// Realpath containment: closes symlink escapes out of the browse roots.
+function isInsideRoot(candidate: string, roots: BrowseRoot[]): boolean {
+  let target: string;
+  try {
+    target = normalizePath(fs.realpathSync(candidate));
+  } catch {
+    return false;
+  }
+  return roots.some((root) => {
+    let base: string;
+    try {
+      base = normalizePath(fs.realpathSync(root.path));
+    } catch {
+      return false;
+    }
+    return target === base || target.startsWith(base + path.sep);
+  });
+}
+
+function listFolderListing(target: string): ServerFolderListing {
+  const roots = browseRoots();
+  if (roots.length === 0) {
+    throw browseError(500, 'No folders are available to browse on this computer.');
+  }
+  const abs = expandUserPath(target);
+
+  if (!isPathInside(abs, roots)) {
+    throw browseError(403, 'That folder is outside the folders this app is allowed to browse.');
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch (err: any) {
+    if (err?.code === 'EACCES' || err?.code === 'EPERM') {
+      throw browseError(403, 'That folder cannot be read. Check its permissions.');
+    }
+    throw browseError(404, 'That folder could not be found. Check the path and try again.');
+  }
+  if (!stat.isDirectory()) {
+    throw browseError(400, 'That path points to a file, not a folder.');
+  }
+  if (!isInsideRoot(abs, roots)) {
+    throw browseError(403, 'That folder is outside the folders this app is allowed to browse.');
+  }
+
+  let dirents: fs.Dirent[];
+  try {
+    dirents = fs.readdirSync(abs, { withFileTypes: true });
+  } catch (err: any) {
+    if (err?.code === 'EACCES' || err?.code === 'EPERM') {
+      throw browseError(403, 'That folder cannot be read. Check its permissions.');
+    }
+    throw browseError(404, 'That folder could not be found. Check the path and try again.');
+  }
+
+  const limit = FS_LIST_LIMIT();
+  const names = dirents
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const truncated = names.length > limit;
+  const entries: FolderEntry[] = names.slice(0, limit).map((name) => ({ name, path: path.join(abs, name) }));
+
+  const parentDir = path.dirname(abs);
+  const hasParent = isPathInside(parentDir, roots);
+  return {
+    path: abs,
+    name: path.basename(abs) || abs,
+    parent: hasParent ? parentDir : null,
+    isRoot: !hasParent,
+    limit,
+    places: roots,
+    entries,
+    truncated,
+  };
+}
+
+app.get('/api/fs/dirs', (req, res) => {
+  try {
+    const raw = typeof req.query.path === 'string' ? req.query.path : '';
+    const roots = browseRoots();
+    if (roots.length === 0) {
+      throw Object.assign(new Error('No folders are available to browse on this computer.'), { statusCode: 500 });
+    }
+    res.json(listFolderListing(raw.trim() ? raw : roots[0].path));
+  } catch (err: any) {
+    const status = Number(err?.statusCode) || 500;
+    const message = err?.statusCode ? err.message : 'That folder could not be found. Check the path and try again.';
+    res.status(status).json({ error: message });
+  }
+});
+
 // ---------- Native folder picker (Windows / macOS / Linux) ----------
 
 let folderPickerBusy = false;
@@ -1944,18 +2146,22 @@ app.post('/api/instagram/active', (req, res) => {
   res.json({ active: accountId, accountNames: accounts[accountId].accountNames });
 });
 
-app.listen(PORT, () => {
-  console.log(`[relate-oauth] listening on http://localhost:${PORT}`);
-  console.log(`[relate-oauth] redirect base: ${APP_BASE}`);
-  console.log(`[relate-oauth] media data dir: ${MEDIA_DIR}`);
-  void detectFfmpeg().then((tools) => {
-    console.log(
-      tools
-        ? `[relate-oauth] video conversion: ${tools.source} ffmpeg`
-        : '[relate-oauth] video conversion disabled (no ffmpeg): unsupported clips may not preview',
-    );
+if (process.env.MEDIA_NO_LISTEN !== '1') {
+  app.listen(PORT, () => {
+    console.log(`[relate-oauth] listening on http://localhost:${PORT}`);
+    console.log(`[relate-oauth] redirect base: ${APP_BASE}`);
+    console.log(`[relate-oauth] media data dir: ${MEDIA_DIR}`);
+    void detectFfmpeg().then((tools) => {
+      console.log(
+        tools
+          ? `[relate-oauth] video conversion: ${tools.source} ffmpeg`
+          : '[relate-oauth] video conversion disabled (no ffmpeg): unsupported clips may not preview',
+      );
+    });
+    if (!META_APP_ID || !META_APP_SECRET) console.warn('[relate-oauth] Meta sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
+    if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) console.warn('[relate-oauth] TikTok sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) console.warn('[relate-oauth] YouTube sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
   });
-  if (!META_APP_ID || !META_APP_SECRET) console.warn('[relate-oauth] Meta sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
-  if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) console.warn('[relate-oauth] TikTok sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) console.warn('[relate-oauth] YouTube sign-in is turned off because its app credentials are missing. See docs/platform-setup.md');
-});
+}
+
+export { app };
