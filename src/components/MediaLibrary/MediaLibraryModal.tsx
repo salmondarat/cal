@@ -211,14 +211,29 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
     reader.onload = async (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
-        if (Array.isArray(parsed)) {
-          for (const item of parsed) {
-            await saveMediaItemToStorage(item);
+        if (!Array.isArray(parsed)) throw new Error('not an array');
+        const usable = parsed.filter(
+          (it: any) => it && typeof it.name === 'string' && typeof it.url === 'string' && !it.url.startsWith('blob:'),
+        );
+        const saved: MediaItem[] = [];
+        const failures: string[] = [];
+        for (const item of usable) {
+          try {
+            saved.push(await saveMediaItemToStorage(item));
+          } catch {
+            failures.push(item.name);
           }
-          onMediaListChange([...parsed, ...mediaList]);
+        }
+        const existingIds = new Set(mediaList.map((m) => m.id));
+        const fresh = saved.filter((m) => !existingIds.has(m.id));
+        onMediaListChange([...fresh, ...mediaList]);
+        const dropped = parsed.length - usable.length + failures.length;
+        if (dropped > 0) {
+          setLibraryError(`${dropped} of ${parsed.length} entries could not be imported and were skipped.`);
         }
       } catch {
         console.error('The media list could not be imported. Check the file and try again.');
+        setLibraryError('The media list could not be imported. Check the file and try again.');
       }
     };
     reader.readAsText(file);

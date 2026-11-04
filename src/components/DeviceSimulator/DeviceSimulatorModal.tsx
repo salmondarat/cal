@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Smartphone, ArrowRight, Share2, Sparkles, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { ScheduledPost, PlatformId } from '../../types';
 import { DeviceSimulator } from './DeviceSimulator';
@@ -32,6 +32,10 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
     status: 'publishing' | 'done' | 'error';
     message: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (isOpen && post) setSelectedPlatform(post.platforms[0] || 'instagram');
+  }, [isOpen, post?.id]);
 
   if (!isOpen || !post) return null;
 

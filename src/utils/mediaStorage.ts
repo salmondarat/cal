@@ -12,6 +12,7 @@ const STORE_NAME = 'media_assets';
 // fall back to per-origin IndexedDB.
 
 let serverMode: boolean | null = null;
+let lastProbeFailedAt = 0;
 
 export async function getMediaStorageInfo(): Promise<any | null> {
   try {
@@ -24,8 +25,14 @@ export async function getMediaStorageInfo(): Promise<any | null> {
 }
 
 async function serverAvailable(): Promise<boolean> {
-  if (serverMode === null) serverMode = Boolean(await getMediaStorageInfo());
-  return serverMode;
+  // Success is sticky for the page lifetime; a failure is retried after 10 s
+  // so a backend started after the page loaded gets picked up without reload.
+  if (serverMode === true) return true;
+  if (serverMode === false && Date.now() - lastProbeFailedAt < 10_000) return false;
+  const ok = Boolean(await getMediaStorageInfo());
+  serverMode = ok;
+  lastProbeFailedAt = ok ? 0 : Date.now();
+  return ok;
 }
 
 function localDateFolder(iso?: string): string {
@@ -261,16 +268,6 @@ function deleteFromLocalStorageFallback(id: string) {
     const updated = existing.filter((m) => m.id !== id);
     localStorage.setItem(LS_FALLBACK_KEY, JSON.stringify(updated));
   } catch {}
-}
-
-// Convert file to Base64 Data URL for persistent offline storage
-export function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
 
 // Export metadata manifest to JSON file

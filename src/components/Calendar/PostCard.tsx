@@ -248,10 +248,10 @@ export const PostCard: React.FC<PostCardProps> = ({
         </span>
         <span className="min-w-0 truncate">{channelNames}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1 text-[#5b6a80]">
-          {post.format === 'video' ? (
-            <Film className="h-2.5 w-2.5" />
-          ) : post.format === 'carousel' ? (
+          {post.format === 'carousel' ? (
             <Layers className="h-2.5 w-2.5" />
+          ) : post.format === 'video' || post.media[0]?.type?.startsWith('video/') ? (
+            <Film className="h-2.5 w-2.5" />
           ) : (
             <ImageIcon className="h-2.5 w-2.5" />
           )}

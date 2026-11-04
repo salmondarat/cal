@@ -20,12 +20,6 @@ export function validateFileSize(file: File): { valid: boolean; error?: string }
   return { valid: true };
 }
 
-export function detectMediaType(file: File): 'image' | 'video' | 'unknown' {
-  if (file.type.startsWith('image/')) return 'image';
-  if (file.type.startsWith('video/')) return 'video';
-  return 'unknown';
-}
-
 export async function processFileToMediaItem(file: File): Promise<MediaItem> {
   const url = URL.createObjectURL(file);
   const isVideo = file.type.startsWith('video/');

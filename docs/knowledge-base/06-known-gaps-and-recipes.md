@@ -67,27 +67,27 @@ Two hard requirements for a live publish:
 | --- | --- | --- | --- | --- |
 | 1 | Media uploaded while the backend is down still keeps a `blob:` URL | `src/utils/mediaStorage.ts` | Post thumbnails break after reload; such posts cannot publish | Composer blocks publishing for non-`serverManaged` items; a load-time migration repoints saved `blob:` posts at library matches by name+size (`src/App.tsx`); backend-down uploads remain unfixable until the file is re-uploaded |
 | 2 | ~~"Today" was hardcoded to 2026-10-21~~ fixed | `src/App.tsx` `handleToday` | — | Now `new Date()` |
-| 3 | Library "Schedule Post" ignores the selected item | `src/App.tsx` `onSelectMediaForPost` | Opens a blank composer; chosen media not attached | Needs a prop to seed media |
+| 3 | ~~Library "Schedule Post" ignored the selected item~~ fixed | `src/App.tsx` `onSelectMediaForPost` | — | Composer now receives `initialMedia` and seeds it |
 | 4 | Bulk builder hardcodes overrides for IG/TikTok/YouTube and a default start date | `src/components/BulkUpload/BulkCampaignModal.tsx:157-176` | Overrides exist for unselected channels; captions are canned; dates may surprise | Overrides are harmless when unselected but misleading |
 | 5 | Bulk format never becomes `carousel` | same file, `:153` | Multi-file batches produce separate image/video posts | One media per post by design |
 | 6 | Date handling still mixes local dates and `toISOString()` in a few places | `MonthView`/`WeekView`/`DayView` now use `localDateString()`; composer picker fixed | Cells could shift by a day | Scheduler compares against `publishAt` computed in the backend's zone (`timezone` is stored per post) |
 | 7 | Overrides snapshot base values at first edit | `UnifiedComposerModal.tsx` | Later base caption/hashtag changes do not flow into already-edited channels | Expected but easy to mistake for a bug |
-| 8 | Simulator keeps the previously selected platform across openings | `DeviceSimulatorModal.tsx`; `DeviceSimulator.tsx` | Wrong chrome can show for a newly opened post | Props are used after mount, but initial state is one-time |
+| 8 | ~~Simulator kept the previously selected platform across openings~~ fixed | `DeviceSimulatorModal.tsx` | — | Selection resets when the modal opens or the post changes |
 | 9 | `/api/health` reports Threads config from Meta credentials | `server.ts` | Cosmetic; fallback makes it equivalent in practice | Use `THREADS_*` for correctness |
-| 10 | Graph version documentation mismatch | `server.ts` vs `.env.example` | Confusion only | Runtime env wins |
+| 10 | ~~Graph version documentation mismatch~~ fixed | `server.ts` vs `.env.example` | — | Both now `v26.0`; runtime env still wins |
 | 11 | ~~Upload progress was simulated~~ fixed | `UnifiedComposerModal.handleFilesAdded` | — | Now counts real per-file uploads to `/api/storage/media` |
 | 12 | Validation is now enforced at save/publish | composer `blockingIssues`, `buildCaption`, `validatePost` | Over-limit captions, browser-only media and empty media are rejected | Drafts still save without media |
 | 13 | Media deletion does not clean posts | `MediaLibraryModal.tsx` | Posts keep broken references | Publish then fails with "not in shared media storage" |
-| 14 | Manifest import prepends without dedupe; may import `data:` URLs | `MediaLibraryModal.tsx` | Duplicates, localStorage bloat | No validation or size cap |
-| 15 | `serverMode` cached for the page lifetime | `mediaStorage.ts` | Backend started after page load is not detected | Reload the page |
-| 16 | Card media badge uses `post.format`, not the file MIME | `PostCard.tsx` | Misleading icon when format/media disagree | Cosmetic |
+| 14 | ~~Manifest import prepended without dedupe~~ fixed | `MediaLibraryModal.tsx` | — | Import validates entries, skips dead `blob:` URLs, dedupes by id, and reports what was dropped |
+| 15 | ~~`serverMode` was cached for the page lifetime~~ fixed | `mediaStorage.ts` | — | Success stays sticky; a failed probe retries after 10 s, so a later-started backend is picked up without reload |
+| 16 | ~~Card media badge used `post.format`, not the file MIME~~ fixed | `PostCard.tsx` | — | Badge falls back to the first media item's MIME |
 | 17 | Test result can mark a connected IG as disconnected if no Page IG is found | `ApiSettingsModal.tsx` | UI-only; reopening the modal re-syncs | Instagram Login path returns early, so this now only affects Page-based setups |
 | 18 | Disconnecting Facebook also removes Instagram-via-Page | shared `meta` group | May surprise users | Standalone IG is unaffected |
-| 19 | Unused dependencies: `@google/genai`, `motion`; unused helpers `fileToBase64`, `detectMediaType` | `package.json`, `mediaStorage.ts`, `mediaUtils.ts` | Dead weight | `metadata.json` claims a Gemini capability that is not implemented |
+| 19 | ~~Unused dependencies and helpers~~ fixed | `package.json` | — | `@google/genai`, `motion`, `fileToBase64`, `detectMediaType` and the false Gemini capability claim removed |
 | 20 | Tailwind utilities from absent plugins | various components | `animate-in`, `fade-in`, `slide-in-from-bottom-3`, `scrollbar-none`, `scrollbar-thin`, `xs:` do nothing | Cosmetic; `animate-spin`/`pulse` work |
-| 21 | No production backend build/start | `package.json` | `build` emits frontend only; the scheduler only runs under `tsx` | Publishing needs the backend to be running |
+| 21 | ~~No production backend build/start~~ fixed | `package.json` | — | `pnpm build:server` bundles `server.js` (ESM, external packages); `pnpm start` runs it |
 | 22 | Backend has no auth, binds all interfaces | `app.listen(PORT)` | Anyone reaching the port can publish, delete posts, read/write media | Now more dangerous: publish/unpublish routes act on real accounts |
-| 23 | Callback HTML does not escape provider detail; receiver accepts any origin | `server.ts` `callbackHtml` | Potential XSS in an origin-served callback page | Harden if exposed |
+| 23 | Callback HTML now escapes provider detail; receiver still accepts any origin | `server.ts` `callbackHtml` | Receiver side is the residual risk | `postMessage` origin cannot be pinned while `APP_URL` may differ from the opener's origin (tunnel vs localhost) |
 | 24 | OAuth state file and media-signing key are plaintext | `.secrets/` | Short-lived state + HMAC key for public media links | Written with mode 0600 |
 | 25 | `posts.json` is the live schedule | `<RELATE_DATA_DIR>/posts.json` | Deleting it deletes the queue | Browser localStorage is a mirror; the backend wins when both exist |
 

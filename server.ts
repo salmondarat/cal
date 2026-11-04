@@ -142,8 +142,9 @@ function missingConfig(res: express.Response, keys: string[]) {
 
 function callbackHtml(platformName: string, ok: boolean, detail: string): string {
   const plain = detail.replace(/<[^>]+>/g, '');
+  const safe = plain.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   return `<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding:40px">
-<h2>${ok ? `${platformName} connected` : `${platformName} connection failed`}</h2><p>${detail}</p>
+<h2>${ok ? `${platformName} connected` : `${platformName} connection failed`}</h2><p>${safe}</p>
 <script>
 if (window.opener) window.opener.postMessage({ type: 'relate-oauth', platform: '${platformName}', ok: ${ok}, message: ${JSON.stringify(plain)} }, '*');
 setTimeout(() => window.close(), 1500);

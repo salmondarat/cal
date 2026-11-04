@@ -110,6 +110,8 @@ Full registration walkthrough — including redirect URIs and tester roles — i
 | `pnpm dev` | Vite dev server on `:3000` (proxies `/auth` and `/api` to the backend) |
 | `pnpm dev:server` | OAuth backend with auto-reload (`tsx watch server.ts`) |
 | `pnpm build` | Production build of the frontend |
+| `pnpm build:server` | Bundle the backend to `server.js` (esbuild, ESM) |
+| `pnpm start` | Run the bundled backend (`node server.js`) |
 | `pnpm preview` | Preview the production build |
 | `pnpm lint` | TypeScript type check (`tsc --noEmit`) |
 | `pnpm clean` | Remove `dist/` |
