@@ -1699,13 +1699,13 @@ function hasDisplay(): boolean {
 
 let cachedCapability: { key: string; value: PickerCapability } | null = null;
 
-// MEDIA_PICKER_BACKEND pins one backend id verbatim; `none` = no native dialog;
-// `auto` (the default) probes the platform chain below.
+// MEDIA_PICKER_BACKEND pins one backend id (lowercased so `Zenity` and `zenity`
+// behave identically); `none` = no native dialog; `auto` (the default) probes
+// the platform chain below.
 function resolvePickerBackend(): string | null {
-  const requested = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim();
-  const forced = requested.toLowerCase();
+  const forced = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
   if (forced === 'none') return null;
-  if (forced !== 'auto') return requested;
+  if (forced !== 'auto') return forced;
   if (process.platform === 'win32') return hasCommand('powershell') ? 'powershell' : null;
   if (process.platform === 'darwin') return hasCommand('osascript') ? 'osascript' : null;
   if (hasDisplay()) {
@@ -1756,65 +1756,92 @@ app.get('/api/fs/folder-picker', (req, res) => {
 
 // ---------- Native folder picker (Windows / macOS / Linux) ----------
 
-let folderPickerBusy = false;
+type PickerResult = { canceled: true } | { canceled: false; path: string };
+interface PickerBackend { id: string; run(): Promise<PickerResult> }
 
-async function pickFolderNative(): Promise<{ canceled: boolean; path?: string }> {
-  const PICKER_TIMEOUT = 5 * 60 * 1000;
+const PICKER_TIMEOUT = 5 * 60 * 1000;
 
+const WINDOWS_FOLDER_DIALOG_SCRIPT = [
+  'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+  '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+  "$dialog.Description = 'Select a media folder'",
+  '$dialog.ShowNewFolderButton = $false',
+  'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+].join('; ');
+
+function commandBackend(id: string, cmd: string, args: string[]): PickerBackend {
+  return {
+    id,
+    run: async () => {
+      const { stdout } = await execFileAsync(cmd, args, { timeout: PICKER_TIMEOUT, windowsHide: true });
+      const chosen = stdout.trim();
+      return chosen ? { canceled: false, path: chosen } : { canceled: true };
+    },
+  };
+}
+
+// Tasks 5 and 6 replace these stubs with the real GTK4 and portal backends.
+// Until then they throw ENOENT so the chain falls through to the others.
+function gtk4PickerBackend(): PickerBackend {
+  return { id: 'gtk4', run: async () => { throw Object.assign(new Error('gtk4 backend not implemented'), { code: 'ENOENT' }); } };
+}
+function portalPickerBackend(): PickerBackend {
+  return { id: 'portal', run: async () => { throw Object.assign(new Error('portal backend not implemented'), { code: 'ENOENT' }); } };
+}
+
+// Read MEDIA_PICKER_BACKEND at call time so a test can flip it between calls.
+export function defaultPickerChain(): PickerBackend[] {
+  const forced = (process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
+  const chain: PickerBackend[] = [];
+  const add = (id: string, make: () => PickerBackend) => {
+    if (forced === 'auto' || forced === id) chain.push(make());
+  };
   if (process.platform === 'win32') {
-    const script = [
-      'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
-      '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-      "$dialog.Description = 'Select a media folder'",
-      '$dialog.ShowNewFolderButton = $false',
-      'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
-    ].join('; ');
-    const { stdout } = await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-STA', '-Command', script],
-      { timeout: PICKER_TIMEOUT, windowsHide: true },
-    );
-    const chosen = stdout.trim();
-    return chosen ? { canceled: false, path: chosen } : { canceled: true };
+    add('powershell', () => commandBackend('powershell', 'powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-STA', '-Command', WINDOWS_FOLDER_DIALOG_SCRIPT,
+    ]));
   }
-
   if (process.platform === 'darwin') {
-    try {
-      const { stdout } = await execFileAsync(
-        'osascript',
-        ['-e', 'POSIX path of (choose folder with prompt "Select a media folder")'],
-        { timeout: PICKER_TIMEOUT },
-      );
-      const chosen = stdout.trim();
-      return chosen ? { canceled: false, path: chosen } : { canceled: true };
-    } catch (err: any) {
-      const detail = `${err?.stderr || ''} ${err?.message || ''}`;
-      if (err?.killed || /cancel|-128/i.test(detail)) return { canceled: true };
-      throw err;
-    }
+    add('osascript', () => commandBackend('osascript', 'osascript', [
+      '-e', 'POSIX path of (choose folder with prompt "Select a media folder")',
+    ]));
   }
+  add('zenity', () => commandBackend('zenity', 'zenity', ['--file-selection', '--directory', '--title=Select a media folder']));
+  add('kdialog', () => commandBackend('kdialog', 'kdialog', ['--getexistingdirectory', os.homedir(), '--title', 'Select a media folder']));
+  add('gtk4', () => gtk4PickerBackend());
+  add('portal', () => portalPickerBackend());
+  return chain;
+}
 
-  const candidates = [
-    { cmd: 'zenity', args: ['--file-selection', '--directory', '--title=Select a media folder'] },
-    { cmd: 'kdialog', args: ['--getexistingdirectory', os.homedir(), '--title', 'Select a media folder'] },
-  ];
-  for (const candidate of candidates) {
+export async function pickFolderNative(chain: PickerBackend[] = defaultPickerChain()): Promise<PickerResult> {
+  for (const backend of chain) {
     try {
-      const { stdout } = await execFileAsync(candidate.cmd, candidate.args, { timeout: PICKER_TIMEOUT });
-      const chosen = stdout.trim();
-      return chosen ? { canceled: false, path: chosen } : { canceled: true };
+      return await backend.run();
     } catch (err: any) {
       if (err?.code === 'ENOENT') continue;
-      if (err?.killed || err?.signal || err?.code === 1) return { canceled: true };
-      throw err;
+      if (err?.killed || err?.signal) return { canceled: true };
+      const detail = `${err?.stderr || ''} ${err?.message || ''}`;
+      if (err?.code === 1 || /cancel|-128/i.test(detail)) return { canceled: true };
+      logDetail(`folder picker backend failed: ${backend.id}`, err);
+      continue;
     }
   }
-
-  throw Object.assign(
-    new Error('No native folder picker is available. Paste the folder path instead.'),
-    { statusCode: 501 },
-  );
+  throw Object.assign(new Error('No native folder picker is available. Paste the folder path instead.'), { statusCode: 501 });
 }
+
+export function createPickerGate() {
+  let busy = false;
+  return {
+    isBusy: () => busy,
+    run: async <T,>(fn: () => Promise<T>): Promise<T> => {
+      if (busy) throw Object.assign(new Error('A folder picker is already open. Finish it first.'), { statusCode: 409 });
+      busy = true;
+      try { return await fn(); } finally { busy = false; }
+    },
+  };
+}
+
+const pickerGate = createPickerGate();
 
 app.get('/api/library/roots', (_req, res) => {
   res.json(
@@ -1927,14 +1954,12 @@ app.get('/api/library/thumbnail', (req, res) => {
   void serveThumbnail(req, res, abs);
 });
 
-app.post('/api/library/pick-folder', async (_req, res) => {
-  if (folderPickerBusy) {
-    return res.status(409).json({ error: 'A folder picker is already open. Finish it first.' });
-  }
-  folderPickerBusy = true;
+app.post('/api/library/pick-folder', async (req, res) => {
+  const blocked = browseGuard(req);
+  if (blocked) return res.status(403).json({ error: blocked });
   try {
-    const result = await pickFolderNative();
-    if (result.canceled || !result.path) return res.json({ canceled: true });
+    const result = await pickerGate.run(() => pickFolderNative());
+    if (result.canceled || !('path' in result)) return res.json({ canceled: true });
     const abs = path.resolve(expandUserPath(result.path));
     let st: fs.Stats;
     try {
@@ -1946,14 +1971,14 @@ app.post('/api/library/pick-folder', async (_req, res) => {
     res.json({ canceled: false, path: abs });
   } catch (err: any) {
     logDetail('folder picker failed', err);
-    const noPicker = err?.statusCode === 501;
-    res.status(noPicker ? 501 : 500).json({
-      error: noPicker
+    const status = Number(err?.statusCode) || 500;
+    res.status(status === 501 ? 501 : status === 409 ? 409 : 500).json({
+      error: status === 501
         ? 'No native folder picker is available on this system. Paste the folder path instead.'
-        : 'The folder picker could not open. Paste the folder path instead.',
+        : status === 409
+          ? 'A folder picker is already open. Finish it first.'
+          : 'The folder picker could not open. Paste the folder path instead.',
     });
-  } finally {
-    folderPickerBusy = false;
   }
 });
 

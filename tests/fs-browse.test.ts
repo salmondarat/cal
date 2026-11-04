@@ -249,3 +249,15 @@ test('probe reports browsing disabled when MEDIA_BROWSE is off', async () => {
   assert.equal(body.detail, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
   process.env.MEDIA_BROWSE = '1';
 });
+
+test('probe lowercases a mixed-case forced backend id', async () => {
+  const previous = process.env.MEDIA_PICKER_BACKEND;
+  try {
+    process.env.MEDIA_PICKER_BACKEND = 'Zenity';
+    const { body } = await get('/api/fs/folder-picker?refresh=1');
+    assert.equal(body.backend, 'zenity');
+    assert.equal(body.available, true);
+  } finally {
+    restoreEnv('MEDIA_PICKER_BACKEND', previous);
+  }
+});
