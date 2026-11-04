@@ -1757,7 +1757,13 @@ app.get('/api/fs/folder-picker', (req, res) => {
 // ---------- Native folder picker (Windows / macOS / Linux) ----------
 
 type PickerResult = { canceled: true } | { canceled: false; path: string };
-interface PickerBackend { id: string; run(): Promise<PickerResult> }
+interface PickerBackend {
+  id: string;
+  run(): Promise<PickerResult>;
+  // Per-backend cancellation detection; a backend without it is never treated
+  // as cancelled by an error (its cancel signal is empty stdout, not an error).
+  isCancellation?: (err: any) => boolean;
+}
 
 const PICKER_TIMEOUT = 5 * 60 * 1000;
 
@@ -1769,9 +1775,16 @@ const WINDOWS_FOLDER_DIALOG_SCRIPT = [
   'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
 ].join('; ');
 
-function commandBackend(id: string, cmd: string, args: string[]): PickerBackend {
+// Cancellation is per backend: zenity/kdialog exit code 1, osascript -128.
+// PowerShell signals a cancel with empty stdout (handled on the success path),
+// so it gets no predicate.
+const exitCodeOne = (err: any) => err?.code === 1;
+const osascriptCanceled = (err: any) => /cancel|-128/i.test(`${err?.stderr || ''} ${err?.message || ''}`);
+
+function commandBackend(id: string, cmd: string, args: string[], isCancellation?: (err: any) => boolean): PickerBackend {
   return {
     id,
+    isCancellation,
     run: async () => {
       const { stdout } = await execFileAsync(cmd, args, { timeout: PICKER_TIMEOUT, windowsHide: true });
       const chosen = stdout.trim();
@@ -1804,10 +1817,10 @@ export function defaultPickerChain(): PickerBackend[] {
   if (process.platform === 'darwin') {
     add('osascript', () => commandBackend('osascript', 'osascript', [
       '-e', 'POSIX path of (choose folder with prompt "Select a media folder")',
-    ]));
+    ], osascriptCanceled));
   }
-  add('zenity', () => commandBackend('zenity', 'zenity', ['--file-selection', '--directory', '--title=Select a media folder']));
-  add('kdialog', () => commandBackend('kdialog', 'kdialog', ['--getexistingdirectory', os.homedir(), '--title', 'Select a media folder']));
+  add('zenity', () => commandBackend('zenity', 'zenity', ['--file-selection', '--directory', '--title=Select a media folder'], exitCodeOne));
+  add('kdialog', () => commandBackend('kdialog', 'kdialog', ['--getexistingdirectory', os.homedir(), '--title', 'Select a media folder'], exitCodeOne));
   add('gtk4', () => gtk4PickerBackend());
   add('portal', () => portalPickerBackend());
   return chain;
@@ -1818,11 +1831,28 @@ export async function pickFolderNative(chain: PickerBackend[] = defaultPickerCha
     try {
       return await backend.run();
     } catch (err: any) {
-      if (err?.code === 'ENOENT') continue;
-      if (err?.killed || err?.signal) return { canceled: true };
-      const detail = `${err?.stderr || ''} ${err?.message || ''}`;
-      if (err?.code === 1 || /cancel|-128/i.test(detail)) return { canceled: true };
-      logDetail(`folder picker backend failed: ${backend.id}`, err);
+      // Every classification branch logs the id, exit code, signal and stderr,
+      // so a user who sees "nothing happened" still leaves a trace.
+      const detail = `code=${err?.code ?? 'none'} signal=${err?.signal ?? 'none'} killed=${Boolean(err?.killed)} stderr=${String(err?.stderr ?? '').trim() || 'none'} message=${err?.message ?? 'none'}`;
+      if (err?.code === 'ENOENT') {
+        logDetail(`folder picker backend unavailable: ${backend.id}`, detail);
+        continue;
+      }
+      if (err?.killed) {
+        // Node killed the child (timeout): nobody answered the dialog.
+        logDetail(`folder picker timed out: ${backend.id}`, detail);
+        return { canceled: true };
+      }
+      if (err?.signal) {
+        // Crashed on its own (signal without Node killing it) — not a dismissal.
+        logDetail(`folder picker backend crashed: ${backend.id}`, detail);
+        continue;
+      }
+      if (backend.isCancellation?.(err)) {
+        logDetail(`folder picker canceled: ${backend.id}`, detail);
+        return { canceled: true };
+      }
+      logDetail(`folder picker backend failed: ${backend.id}`, detail);
       continue;
     }
   }

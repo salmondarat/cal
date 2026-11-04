@@ -36,6 +36,11 @@ async function get(p: string) {
   return { status: res.status, body: await res.json() };
 }
 
+async function post(p: string) {
+  const res = await fetch(`${base}${p}`, { method: 'POST' });
+  return { status: res.status, body: await res.json() };
+}
+
 test('lists directories only, hides dotfiles, sorts numerically', async () => {
   fs.mkdirSync(path.join(ROOT, 'Folder 2'), { recursive: true });
   fs.mkdirSync(path.join(ROOT, 'Folder 10'), { recursive: true });
@@ -258,6 +263,35 @@ test('probe lowercases a mixed-case forced backend id', async () => {
     assert.equal(body.backend, 'zenity');
     assert.equal(body.available, true);
   } finally {
+    restoreEnv('MEDIA_PICKER_BACKEND', previous);
+  }
+});
+
+test('POST /api/library/pick-folder is refused by the browse guard with 403', async () => {
+  const previous = process.env.MEDIA_BROWSE;
+  try {
+    process.env.MEDIA_BROWSE = '0';
+    const { status, body } = await post('/api/library/pick-folder');
+    assert.equal(status, 403);
+    assert.equal(body.error, 'Folder browsing is turned off on this computer. Paste the folder path instead.');
+  } finally {
+    restoreEnv('MEDIA_BROWSE', previous);
+  }
+});
+
+test('POST /api/library/pick-folder returns 501 when no picker backend exists', async () => {
+  const previous = process.env.MEDIA_PICKER_BACKEND;
+  const warns: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(' ')); };
+  try {
+    process.env.MEDIA_PICKER_BACKEND = 'none';
+    const { status, body } = await post('/api/library/pick-folder');
+    assert.equal(status, 501);
+    assert.equal(body.error, 'No native folder picker is available on this system. Paste the folder path instead.');
+    assert.ok(warns.some((w) => w.includes('folder picker failed')), 'the route logs the failure');
+  } finally {
+    console.warn = originalWarn;
     restoreEnv('MEDIA_PICKER_BACKEND', previous);
   }
 });
