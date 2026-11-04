@@ -314,6 +314,42 @@ test('every offered volume is a real mount point', async () => {
   }
 });
 
+test('a NUL byte in the path is a 400, not a confusing 404', async () => {
+  const { status, body } = await get('/api/fs/dirs?path=' + encodeURIComponent(`${ROOT}\0x`));
+  assert.equal(status, 400);
+  assert.equal(body.error, 'That path points to a file, not a folder.');
+});
+
+test('a folder that links to itself is not offered as a subfolder', async () => {
+  // `ln -s . loop` would let the user walk the tree forever.
+  const loop = path.join(ROOT, 'loop');
+  try { fs.symlinkSync('.', loop, 'dir'); } catch { return; } // no symlink support: skip
+  const { status, body } = await get('/api/fs/dirs?path=' + encodeURIComponent(ROOT));
+  assert.equal(status, 200);
+  assert.ok(!body.entries.some((e: any) => e.name === 'loop'), 'the self-referencing link is not listed');
+});
+
+test('a symlink that stays inside a root is still listed', async () => {
+  const inner = path.join(ROOT, 'inner');
+  fs.mkdirSync(inner, { recursive: true });
+  const link = path.join(ROOT, 'inside-link');
+  try { fs.symlinkSync(inner, link, 'dir'); } catch { return; }
+  const { body } = await get('/api/fs/dirs?path=' + encodeURIComponent(ROOT));
+  assert.ok(body.entries.some((e: any) => e.name === 'inside-link'), 'a link inside the root is listed');
+});
+
+test('an unknown MEDIA_PICKER_BACKEND reports unavailable instead of a phantom backend', async () => {
+  const previous = process.env.MEDIA_PICKER_BACKEND;
+  try {
+    process.env.MEDIA_PICKER_BACKEND = 'typo';
+    const { body } = await get('/api/fs/folder-picker?refresh=1');
+    assert.equal(body.available, false);
+    assert.equal(body.backend, null);
+  } finally {
+    restoreEnv('MEDIA_PICKER_BACKEND', previous);
+  }
+});
+
 test('the browse payloads match the frontend client types', async () => {
   // Guards the contract between the server's JSON and the client's
   // ServerFolderListing / FolderPickerCapability: a renamed field would

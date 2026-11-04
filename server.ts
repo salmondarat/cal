@@ -1619,6 +1619,13 @@ function listFolderListing(target: string): ServerFolderListing {
   }
   const abs = expandUserPath(target);
 
+  // A NUL byte is not a path: reject it before touching the filesystem, the
+  // same way resolveInRoot does, rather than letting statSync throw an
+  // invalid-argument error that would surface as a confusing 404.
+  if (abs.includes('\0')) {
+    throw browseError(400, 'That path points to a file, not a folder.');
+  }
+
   if (!isPathInside(abs, roots)) {
     throw browseError(403, 'That folder is outside the folders this app is allowed to browse.');
   }
@@ -1651,11 +1658,36 @@ function listFolderListing(target: string): ServerFolderListing {
 
   const limit = FS_LIST_LIMIT();
   const names = dirents
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    // A Dirent reports a symlink as a link, not as the directory it points
+    // at, so a symlinked folder has to be considered here too — the spec says
+    // symlinked directories are listed.
+    .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith('.'))
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   const truncated = names.length > limit;
-  const entries: FolderEntry[] = names.slice(0, limit).map((name) => ({ name, path: path.join(abs, name) }));
+
+  // Skip a child that points back at this folder (`ln -s . loop`): following
+  // it would walk the tree forever. A link that stays inside a root is still
+  // listed — only the self-loop is dropped.
+  let selfReal: string;
+  try {
+    selfReal = fs.realpathSync(abs);
+  } catch {
+    selfReal = abs;
+  }
+  const entries: FolderEntry[] = [];
+  for (const name of names.slice(0, limit)) {
+    const child = path.join(abs, name);
+    try {
+      // statSync follows the link, so a link to a file is not offered.
+      if (!fs.statSync(child).isDirectory()) continue;
+      if (fs.realpathSync(child) === selfReal) continue;
+    } catch {
+      // A broken link: not worth offering.
+      continue;
+    }
+    entries.push({ name, path: child });
+  }
 
   const parentDir = path.dirname(abs);
   const hasParent = isPathInside(parentDir, roots);
@@ -1766,21 +1798,72 @@ function gtk4Importable(force = false): boolean {
   return ok;
 }
 
+// The desktop portal is only usable when gdbus exists AND the session bus
+// actually answers. Reporting it unconditionally would offer a button that
+// cannot open on a headless or containerised machine — the exact "no native
+// folder picker is available" failure this feature exists to remove.
+let cachedPortal: boolean | null = null;
+
+function portalAvailable(force = false): boolean {
+  if (!force && cachedPortal !== null) return cachedPortal;
+  if (!hasCommand('gdbus')) {
+    cachedPortal = false;
+    return false;
+  }
+  try {
+    execFileSync(
+      'gdbus',
+      [
+        'introspect',
+        '--session',
+        '--dest',
+        'org.freedesktop.portal.Desktop',
+        '--object-path',
+        '/org/freedesktop/portal/desktop',
+      ],
+      { timeout: 5000, stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    cachedPortal = true;
+  } catch (err: any) {
+    logDetail(
+      'portal introspect failed',
+      `status=${err?.status ?? err?.code ?? 'none'} signal=${err?.signal ?? 'none'} message=${err?.message ?? 'none'}`,
+    );
+    cachedPortal = false;
+  }
+  return cachedPortal;
+}
+
+// The backend ids the chain knows how to build.
+const PICKER_BACKEND_IDS = new Set([
+  'zenity',
+  'kdialog',
+  'gtk4',
+  'portal',
+  'powershell',
+  'pwsh',
+  'osascript',
+]);
+
 // MEDIA_PICKER_BACKEND pins one backend id (lowercased so `Zenity` and `zenity`
 // behave identically); `none` = no native dialog; `auto` (the default) probes
 // the platform chain below.
 function resolvePickerBackend(force = false): string | null {
   const forced = String(process.env.MEDIA_PICKER_BACKEND || 'auto').trim().toLowerCase();
   if (forced === 'none') return null;
-  if (forced !== 'auto') return forced;
-  if (process.platform === 'win32') return hasCommand('powershell') ? 'powershell' : null;
+  if (forced !== 'auto') return PICKER_BACKEND_IDS.has(forced) ? forced : null;
+  if (process.platform === 'win32') {
+    if (hasCommand('powershell')) return 'powershell';
+    if (hasCommand('pwsh')) return 'pwsh';
+    return null;
+  }
   if (process.platform === 'darwin') return hasCommand('osascript') ? 'osascript' : null;
   if (hasDisplay()) {
     if (hasCommand('zenity')) return 'zenity';
     if (hasCommand('kdialog')) return 'kdialog';
     if (gtk4Importable(force)) return 'gtk4';
   }
-  return 'portal';
+  return portalAvailable(force) ? 'portal' : null;
 }
 
 function probeFolderPicker(force = false): PickerCapability {
@@ -2015,6 +2098,11 @@ export function defaultPickerChain(): PickerBackend[] {
   };
   if (process.platform === 'win32') {
     add('powershell', () => commandBackend('powershell', 'powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-STA', '-Command', WINDOWS_FOLDER_DIALOG_SCRIPT,
+    ]));
+    // PowerShell 7 ships as pwsh and is a working fallback where
+    // powershell.exe is absent.
+    add('pwsh', () => commandBackend('pwsh', 'pwsh', [
       '-NoProfile', '-NonInteractive', '-STA', '-Command', WINDOWS_FOLDER_DIALOG_SCRIPT,
     ]));
   }

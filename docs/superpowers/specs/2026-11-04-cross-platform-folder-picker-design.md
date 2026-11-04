@@ -101,8 +101,13 @@ Resolution order:
      (`fs.existsSync('C:\\')`), `kind: 'volume'`.
    - macOS: `os.homedir()` plus immediate children of `/Volumes` that are
      directories, `kind: 'volume'`.
-   - Linux: `os.homedir()` plus immediate children of `/media`, `/media/*`,
-     `/mnt`, `/run/media/*` that are directories, `kind: 'volume'`.
+   - Linux: `os.homedir()` plus **real mount points** under `/media`, `/mnt` and
+     `/run/media`, read from `/proc/mounts` (a child segment is required, so a
+     tmpfs mounted on `/run/media` itself is not offered). A volume is a mount
+     point, not merely a directory that happens to sit under those roots —
+     otherwise `Program Files`, `Recovery` and `$RECYCLE.BIN` would be offered
+     as browsable places. When `/proc/mounts` is unreadable, fall back to the
+     immediate children of those roots. `kind: 'volume'`.
 
 If the resulting list is empty (for example `MEDIA_BROWSE_ROOTS` names only
 missing paths), browsing is unavailable: `/api/fs/dirs` returns

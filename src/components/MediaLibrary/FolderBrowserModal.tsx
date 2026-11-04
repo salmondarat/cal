@@ -36,6 +36,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   const [highlight, setHighlight] = useState(0);
   const [placesOpen, setPlacesOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const requestIdRef = useRef(0);
 
@@ -116,6 +117,10 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+      // Buttons outside the list (close, back, places, Cancel, "Use this
+      // folder") keep their native Enter behaviour — hijacking it would make
+      // the primary action unreachable by keyboard.
+      if (target instanceof HTMLButtonElement && !listRef.current?.contains(target)) return;
       const count = listing?.entries.length ?? 0;
       if (event.key === 'ArrowDown') {
         setHighlight((h) => Math.min(h + 1, Math.max(count - 1, 0)));
@@ -123,6 +128,9 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       } else if (event.key === 'ArrowUp') {
         setHighlight((h) => Math.max(h - 1, 0));
         event.preventDefault();
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        goUp();
       } else if (event.key === 'Enter') {
         // preventDefault, or a focused button would ALSO be activated by the
         // browser's default key handling — Enter on "Use this folder" would
@@ -133,6 +141,27 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
         // Backspace would otherwise leave the page in some browsers.
         event.preventDefault();
         goUp();
+      } else if (event.key === 'Tab') {
+        // Keep focus inside the dialog: Tab must not walk into the page
+        // behind it.
+        const root = dialogRef.current;
+        if (!root) return;
+        const focusable = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (event.shiftKey && (active === first || !root.contains(active))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (active === last || !root.contains(active))) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener('keydown', handleKey);
@@ -183,6 +212,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         className="flex flex-col w-full max-w-2xl max-h-[85vh] mx-auto my-auto bg-white rounded-lg shadow-xl overflow-hidden"
         onClick={(event) => event.stopPropagation()}
       >
@@ -278,7 +308,8 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
                         type="button"
                         onClick={() => setHighlight(index)}
                         onDoubleClick={() => enter(entry)}
-                        className={`w-full flex items-center gap-2 px-2 py-1 text-left text-[11px] rounded-[6px] ${
+                        aria-current={index === highlight ? 'true' : undefined}
+                        className={`w-full min-h-[44px] sm:min-h-0 flex items-center gap-2 px-2 py-2 sm:py-1 text-left text-[11px] rounded-[6px] ${
                           index === highlight
                             ? 'bg-blue-50 text-[#0000ee]'
                             : 'text-neutral-600 hover:bg-neutral-100'
@@ -313,7 +344,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
           <button
             type="button"
             onClick={() => listing && onSelect(listing.path)}
-            disabled={loading || !listing}
+            disabled={loading || !listing || Boolean(error)}
             className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-white bg-[#020520] hover:bg-[#0f1f3d] disabled:opacity-40 rounded-[6px] transition-colors"
           >
             <ChevronRight className="w-3.5 h-3.5" />
