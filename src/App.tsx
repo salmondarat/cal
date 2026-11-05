@@ -75,7 +75,8 @@ const GateLockScreen: React.FC<{ onUnlocked: () => void }> = ({ onUnlocked }) =>
         body: JSON.stringify({ password }),
       });
       if (res.ok) onUnlocked();
-      else setError('That password is not correct.');
+      else if (res.status === 401) setError('That password is not correct.');
+      else setError('The server did not accept the login attempt. Check that the backend is running.');
     } catch {
       setError('The server could not be reached. Try again.');
     } finally {

@@ -28,6 +28,7 @@ export default defineConfig(({mode}) => {
         // true rewrites it to localhost and every client looks local.
         '/auth': { target: `http://localhost:${oauthPort}`, changeOrigin: false },
         '/api': { target: `http://localhost:${oauthPort}`, changeOrigin: false },
+        '/gate': { target: `http://localhost:${oauthPort}`, changeOrigin: false },
       },
     },
   };
