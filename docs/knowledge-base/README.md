@@ -2,7 +2,7 @@
 
 > Master entry point for AI agents and developers working on this repository.
 > Source of truth is always the code. This knowledge base was reviewed against
-> commit `9d75e55` on 2026-10-23.
+> commit `f9dd128` on 2026-11-05.
 
 ---
 
@@ -20,9 +20,13 @@ channels — Instagram, Facebook, Threads, TikTok and YouTube. It provides:
   storage, automatic refresh where supported, and a live "Test API Connection"
   handshake.
 
-**Publishing is not implemented.** The UI's "Simulate Instant Publish" action
-only mutates local state/metrics. This repository covers *planning, composing,
-previewing and connecting accounts*, not delivering content to the platforms.
+**Publishing is real for Instagram and Threads** (container → publish →
+permalink, unpublish deletes the platform copy, a scheduler delivers due
+posts and retries failures with backoff). TikTok, YouTube and Facebook Page
+are schedule-only: results record `skipped`, and both publish entry points
+refuse posts that target nothing but unsupported platforms. See
+[06-known-gaps-and-recipes.md](./06-known-gaps-and-recipes.md) §1 for the
+full picture, and [`../openapi.yaml`](../openapi.yaml) for every route.
 
 The app began as an AI Studio scaffold (`metadata.json`, `.aistudio/`,
 `index.html`, `src/main.tsx`) and was extended with the Express OAuth/media
@@ -43,11 +47,11 @@ backend in `server.ts`.
 | OAuth connect (5 tabs / 5 flows) | Implemented | Meta, Threads, Instagram Login, TikTok, Google |
 | Live connection verification | Implemented | `/api/verify/:platform` calls real APIs |
 | Automatic token refresh | Partial | TikTok, YouTube, Threads, Instagram Login; **not Meta** |
-| Real publishing | **Not implemented** | Simulator only |
-| Background scheduling/jobs | **Not implemented** | "Scheduled" is metadata |
-| Authentication/authorization | **None** | Backend is a local single-user tool |
-| Tests / CI | **None** | No test runner, no workflow |
-| Production server build | **None** | `vite build` builds the frontend only |
+| Real publishing | **Implemented for Instagram + Threads** | Scheduler, retries, unpublish, publish log; TikTok/YouTube/Facebook record `skipped` |
+| Background scheduling/jobs | **Implemented** | `posts.json` is the live schedule; scheduler in `server.ts` |
+| Authentication/authorization | Optional | `APP_PASSWORD` gate (session cookie) for LAN use; no real accounts — see gap #22 |
+| Tests / CI | **77 `node:test` tests** | `pnpm test`; no CI workflow yet |
+| Production server build | **Implemented** | `pnpm build:server` → `server.js`, run with `pnpm start` |
 | Analytics / metrics | Simulated | Random values stored in localStorage |
 
 ---

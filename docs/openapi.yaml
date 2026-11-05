@@ -408,6 +408,7 @@ paths:
                 platforms: { type: array, items: { type: string, enum: [instagram, facebook, threads, tiktok, youtube] } }
       responses:
         "202": { description: "{ started: true, postId, platforms, status: 'publishing' }" }
+        "400": { description: "No channel picked, or none of the selected platforms is supported by this build (only Instagram and Threads are sent)" }
         "409": { description: "Already being published" }
 
   /api/posts/{id}/unpublish:

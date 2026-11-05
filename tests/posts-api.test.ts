@@ -113,6 +113,21 @@ test('scheduling an unsupported platform without publish:true still works', asyn
   assert.ok(created.body.post.warnings.some((w: string) => /not sent by this build/i.test(w)));
 });
 
+test('manual publish of an all-unsupported post is refused with 400', async () => {
+  await call('POST', '/api/posts', postBody('post-api-test-7', { platforms: ['tiktok'] }));
+  const attempt = await call('POST', '/api/posts/post-api-test-7/publish');
+  assert.equal(attempt.status, 400);
+  assert.match(attempt.body.error, /cannot publish to TikTok/i);
+});
+
+test('manual publish of an unsupported subset of a mixed post is refused', async () => {
+  await call('POST', '/api/posts', postBody('post-api-test-8', { platforms: ['instagram', 'tiktok'] }));
+  const attempt = await call('POST', '/api/posts/post-api-test-8/publish', { platforms: ['tiktok'] });
+  assert.equal(attempt.status, 400);
+  const post = await call('GET', '/api/posts/post-api-test-8');
+  assert.notEqual(post.body.status, 'publishing');
+});
+
 test('validate endpoint explains an agent post before publishing', async () => {
   await call('POST', '/api/posts', postBody('post-api-test-6', { media: [] }));
   const v = await call('POST', '/api/posts/post-api-test-6/validate');

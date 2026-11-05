@@ -4218,10 +4218,15 @@ app.post('/api/posts/:id/validate', async (req, res) => {
 app.post('/api/posts/:id/publish', async (req, res) => {  const post = getStoredPost(req.params.id);
   if (!post) return res.status(404).json({ error: 'That post is no longer in the schedule.' });
   if (inFlight.has(post.id)) return res.status(409).json({ error: 'This post is already being published. Watch its status.' });
-  const platforms = Array.isArray(req.body?.platforms)
-    ? req.body.platforms.filter((p: string): p is PlatformKey => post.platforms.includes(p as PlatformKey))
+  const platforms: PlatformKey[] = Array.isArray(req.body?.platforms)
+    ? req.body.platforms.filter((p: unknown): p is PlatformKey => post.platforms.includes(p as PlatformKey))
     : post.platforms;
   if (!platforms.length) return res.status(400).json({ error: 'Pick at least one channel to publish.' });
+  if (!platforms.some((p) => SUPPORTED_PUBLISH.includes(p))) {
+    return res.status(400).json({
+      error: `This build cannot publish to ${platforms.map((p) => PLATFORM_NAMES[p]).join(' and ')} yet. Choose Instagram or Threads.`,
+    });
+  }
 
   res.status(202).json({ started: true, postId: post.id, platforms, status: 'publishing' });
   void publishPost(post.id, 'manual').catch((err) => logDetail('manual publish crashed', err));

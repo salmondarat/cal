@@ -15,6 +15,11 @@ Real (backend `server.ts`, "Publishing" sections):
 - `POST /api/posts/:id/publish` starts a delivery job and answers `202`
   immediately; the job keeps running after the browser closes. The client polls
   `GET /api/posts/:id` until the status leaves `publishing`.
+- Both publish entry points (`POST /api/posts` with `publish:true` and
+  `POST /api/posts/:id/publish`) refuse with `400` when none of the selected
+  platforms are supported by this build, so an all-`skipped` run can no longer
+  be started deliberately. An all-skipped post also gets no retry backoff —
+  only `failed` results schedule a `nextTryAt`.
 - Instagram (Instagram Login, or an Instagram account attached to a Facebook
   Page): create container → poll `status_code` until `FINISHED` →
   `media_publish` → read `permalink`. Feed image, Reel, and carousel (child
@@ -296,8 +301,15 @@ For any non-trivial change:
 - [ ] Does it touch posts? Confirm localStorage survives reload and old posts
       still render.
 - [ ] Does it add a platform? Every mapping table must be updated (types,
-      constants, icon, server, settings).
-- [ ] Does it claim to publish? It does not, unless a real backend call was added.
-- [ ] Did `npm run lint` and `npm run build` pass?
+      constants, icon, server, settings). Publishing a new platform also means
+      adding it to `SUPPORTED_PUBLISH` — until then both publish endpoints
+      refuse posts that target only unsupported platforms.
+- [ ] Does it claim to publish? Instagram and Threads are real; anything else
+      records `skipped`. Never report success without a platform post id.
+- [ ] Did you update `docs/openapi.yaml` when routes or body shapes changed?
+- [ ] Do new HTTP tests pin `APP_PASSWORD=''` before importing the server?
+      dotenv reads the developer's `.env`, and a live gate password breaks
+      every HTTP test suite.
+- [ ] Did `pnpm lint`, `pnpm test` and `pnpm build` pass?
 - [ ] Were the docs (`README.md`, `docs/platform-setup.md`, this knowledge base)
       updated with the new behaviour or limitation?
