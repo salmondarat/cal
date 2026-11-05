@@ -93,23 +93,24 @@ test('unknown inline media type is refused', async () => {
   assert.equal(bad.status, 400);
 });
 
-test('publish:true starts delivery; unsupported platforms report skipped without network', async () => {
+test('publish:true on an all-unsupported post is refused with 400 and stores nothing', async () => {
   const created = await call('POST', '/api/posts', postBody('post-api-test-5', {
     platforms: ['tiktok'],
     media: [{ name: 'agent-shot-2.png', data: `data:image/png;base64,${PNG_B64}` }],
     publish: true,
   }));
+  assert.equal(created.status, 400);
+  assert.match(created.body.error, /cannot publish to TikTok/i);
+  const date = new Date().toISOString().slice(0, 10);
+  assert.ok(!fs.existsSync(path.join(TMP, 'data', 'media', date, 'agent-shot-2.png')), 'no orphaned media');
+  const gone = await call('GET', '/api/posts/post-api-test-5');
+  assert.ok(gone.status === 404 || !gone.body?.id);
+});
+
+test('scheduling an unsupported platform without publish:true still works', async () => {
+  const created = await call('POST', '/api/posts', postBody('post-api-test-5b', { platforms: ['tiktok'] }));
   assert.equal(created.status, 201);
-  assert.equal(created.body.publish.started, true);
-  const deadline = Date.now() + 5000;
-  let results: any = null;
-  while (Date.now() < deadline) {
-    const got = await call('GET', '/api/posts/post-api-test-5');
-    results = got.body.results;
-    if (results?.tiktok) break;
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  assert.equal(results?.tiktok?.status, 'skipped');
+  assert.ok(created.body.post.warnings.some((w: string) => /not sent by this build/i.test(w)));
 });
 
 test('validate endpoint explains an agent post before publishing', async () => {

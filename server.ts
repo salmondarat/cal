@@ -3927,6 +3927,22 @@ const MIME_TO_MEDIA_EXT: Record<string, string> = {
 
 app.post('/api/posts', (req, res) => {
   const body = req.body || {};
+
+  // Fail fast before touching storage: this build only sends to
+  // SUPPORTED_PUBLISH, so publish:true on an all-unsupported post would
+  // otherwise create a doomed post and orphan its inline media files.
+  if (body.publish === true) {
+    const requested: PlatformKey[] = (Array.isArray(body.platforms) ? body.platforms : []).filter(
+      (p: unknown): p is PlatformKey => PUBLISH_PLATFORMS.includes(p as PlatformKey),
+    );
+    if (!requested.some((p) => SUPPORTED_PUBLISH.includes(p))) {
+      const names = requested.length ? requested.map((p) => PLATFORM_NAMES[p]).join(' and ') : 'those channels';
+      return res.status(400).json({
+        error: `This build cannot publish to ${names} yet. Drop publish:true to schedule it, or choose Instagram or Threads.`,
+      });
+    }
+  }
+
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   const todayFolder = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
