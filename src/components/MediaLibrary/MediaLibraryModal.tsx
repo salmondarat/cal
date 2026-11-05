@@ -107,6 +107,7 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const rootsLoadedRef = useRef(false);
+  const knownRootIdsRef = useRef<Set<string> | null>(null);
 
   const loadRoots = async () => {
     setRootsLoading(true);
@@ -114,7 +115,24 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
     try {
       const list = await getLibraryRoots();
       setRoots(list);
-      setActiveRootId((prev) => (prev && list.some((r) => r.id === prev) ? prev : list[0]?.id ?? null));
+      const known = knownRootIdsRef.current;
+      const added = known ? list.filter((r) => !known.has(r.id)) : [];
+      knownRootIdsRef.current = new Set(list.map((r) => r.id));
+      if (added.length > 0) {
+        // A folder appeared mid-session (imported or added on another
+        // device): jump to the newest one so it is not missed.
+        const newest = [...added].sort((a, b) => b.addedAt.localeCompare(a.addedAt))[0];
+        setActiveRootId(newest.id);
+        setCurrentPath('');
+        setExpandedFolders((prev) => ({ ...prev, [`${newest.id}:`]: true }));
+        setImportNotice(
+          added.length === 1
+            ? `New folder in the library: ${newest.name}`
+            : `${added.length} new folders in the library — showing ${newest.name}.`,
+        );
+      } else {
+        setActiveRootId((prev) => (prev && list.some((r) => r.id === prev) ? prev : list[0]?.id ?? null));
+      }
     } catch (e) {
       setLibraryError(toUserMessage(e, 'Could not open the local media library. Please try again.'));
     } finally {
