@@ -519,7 +519,7 @@ components:
         baseHashtags: { type: array, items: { type: string } }
         platformOverrides:
           type: object
-          description: "Per-platform { caption, hashtags, scheduledTime, format, firstComment, soundTitle }"
+          description: "Per-platform { caption, hashtags, scheduledTime, format, firstComment, soundTitle }. firstComment and soundTitle are stored and shown in the simulator but NOT sent to any platform — no comment/sound API call exists yet."
         platformAccounts:
           type: object
           description: "Per-platform account id, e.g. { instagram: '1784...' }"

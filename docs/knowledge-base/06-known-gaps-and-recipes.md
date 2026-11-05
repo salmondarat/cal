@@ -96,6 +96,7 @@ Two hard requirements for a live publish:
 | 23 | Callback HTML now escapes provider detail; receiver still accepts any origin | `server.ts` `callbackHtml` | Receiver side is the residual risk | `postMessage` origin cannot be pinned while `APP_URL` may differ from the opener's origin (tunnel vs localhost) |
 | 24 | OAuth state file and media-signing key are plaintext | `.secrets/` | Short-lived state + HMAC key for public media links | Written with mode 0600 |
 | 25 | `posts.json` is the live schedule | `<RELATE_DATA_DIR>/posts.json` | Deleting it deletes the queue | Browser localStorage is a mirror; the backend wins when both exist |
+| 26 | `firstComment` and `soundTitle` are stored but never sent | composer UI, `platformOverrides`; absent from `server.ts` publishing paths | The UI promises a feature that does not happen | Label now says "saved — not posted yet"; implementing needs an Instagram comments create call after publish, and a TikTok sound attach |
 
 ---
 

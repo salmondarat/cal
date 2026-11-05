@@ -42,7 +42,7 @@ type CalendarViewMode = 'month' | 'week' | 'day';
   hashtags: string[];
   scheduledTime: string;   // HH:mm
   format: MediaFormat;
-  firstComment?: string;   // Instagram only in the UI
+  firstComment?: string;   // Instagram UI only; stored, never sent (no comment API call yet)
   soundTitle?: string;     // TikTok only in the UI
   collaborator?: string;   // declared, no UI
   videoThumbnailUrl?: string; // declared, no UI

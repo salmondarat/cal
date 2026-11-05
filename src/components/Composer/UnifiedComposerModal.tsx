@@ -934,7 +934,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 {activePlatformTab === 'instagram' && (
                   <div>
                     <label className="text-[11px] font-medium text-neutral-700 mb-1 block">
-                      Automated First Comment (optional)
+                      First Comment <span className="text-neutral-400">(saved with the post — not posted yet)</span>
                     </label>
                     <input
                       type="text"

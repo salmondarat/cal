@@ -22,6 +22,12 @@ export default defineConfig(({mode}) => {
       // localtest.me resolves to 127.0.0.1 — used for Meta OAuth when
       // "localhost" is not accepted as an App Domain.
       allowedHosts: ['.localtest.me', '.trycloudflare.com', '.internalc.my.id'],
+      fs: {
+        // Vite's dev server serves project-root files on demand. The defaults
+        // deny .env* — but NOT .secrets/, where OAuth tokens and the media
+        // signing + session keys live, nor the backend source. Deny both.
+        deny: ['.env', '.env.*', '*.local', '*.{crt,pem}', '**/.secrets/**', '**/.secrets', 'server.ts', '/server.ts'],
+      },
       proxy: {
         // changeOrigin must stay false: the backend's remote-client gate
         // (isLocalRequest) reads the original Host header. Vite's default of

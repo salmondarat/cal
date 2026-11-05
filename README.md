@@ -227,6 +227,11 @@ The shortcut layer is idle while you are typing in a field or a dialog is open.
 ## Security notes
 
 - Never commit `.env`, `.secrets/`, or tunnel credentials — all are git-ignored.
+- The Vite dev server denies `.env*`, `.secrets/**` and `server.ts` over HTTP
+  (`server.fs.deny`); before this they were plain 200 responses on the LAN.
+  Other project files (docs, source) are still readable from the dev server —
+  that is inherent to dev mode; serve `pnpm build` output through the backend
+  for anything beyond a trusted network.
 - Set `APP_PASSWORD` in `.env` to require a password before any device (other
   laptops, phones, anything reaching the port) can use the app. Sessions last
   30 days; changing the password invalidates them. Over plain HTTP this deters
