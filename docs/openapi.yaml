@@ -1,0 +1,516 @@
+openapi: 3.1.0
+info:
+  title: Relate Social API
+  version: 1.0.0
+  description: >
+    Backend API of the Relate Social scheduler. The browser (and any agent)
+    talks to the Vite origin (:3000 in dev), which proxies /api, /auth and
+    /gate to the Express backend (:8787); both origins serve the same routes.
+
+    Authentication: when APP_PASSWORD is set in .env, every /api and /auth
+    route requires the relate_session cookie obtained from POST /gate/login.
+    GET /api/gate/status and both /gate/login methods are exempt, as is
+    /api/public-media/{token} (platform servers fetch media with the signed
+    token only).
+servers:
+  - url: http://localhost:3000
+    description: Dev origin (Vite proxy)
+  - url: http://localhost:8787
+    description: Backend directly
+
+tags:
+  - { name: gate }
+  - { name: meta }
+  - { name: connections }
+  - { name: media, description: "Universal media store (date folders on the server disk)" }
+  - { name: library, description: "Local folders indexed in place, never copied" }
+  - { name: browse, description: "Server-side folder browsing and native picker" }
+  - { name: imports, description: "Media imported (copied) from a client device" }
+  - { name: posts, description: "Scheduled posts: the live server-side schedule" }
+  - { name: publish }
+
+paths:
+  /gate/login:
+    post:
+      tags: [gate]
+      summary: Exchange the APP_PASSWORD for a 30-day session cookie
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [password], properties: { password: { type: string } } }
+      responses:
+        "200": { description: "Session cookie set, body { ok: true }" }
+        "401": { description: Wrong password }
+    get:
+      tags: [gate]
+      summary: Standalone login page (used by OAuth popup tabs)
+      responses: { "200": { description: HTML login form } }
+
+  /api/gate/status:
+    get:
+      tags: [gate]
+      summary: Whether a password is required and whether this client is authenticated
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { required: { type: boolean }, authenticated: { type: boolean } }
+
+  /api/health:
+    get:
+      tags: [meta]
+      summary: Which OAuth apps are configured
+      responses: { "200": { description: "{ metaConfigured, tiktokConfigured, youtubeConfigured, threadsConfigured, instagramLoginConfigured, graphVersion, redirectBase }" } }
+
+  /api/connections:
+    get:
+      tags: [connections]
+      summary: Connected accounts with masked tokens only
+      responses: { "200": { description: "Array of { platform, accountNames, accountIds, scopes, masked token, expiresAt }" } }
+
+  /api/verify/{platform}:
+    post:
+      tags: [connections]
+      summary: Live handshake against the platform API ("Test API Connection")
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string, enum: [meta, instagram, threads, tiktok, youtube] }
+      responses:
+        "200": { description: "{ platform, ok: true, identity, ... }" }
+        default: { $ref: "#/components/responses/ApiError" }
+
+  /api/disconnect/{platform}:
+    post:
+      tags: [connections]
+      summary: Delete stored tokens for a platform
+      parameters: [{ in: path, name: platform, required: true, schema: { type: string } }]
+      responses: { "200": { description: "{ disconnected: platform }" } }
+
+  /api/instagram/active:
+    post:
+      tags: [connections]
+      summary: Switch the active Instagram Login account
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { accountId: { type: string } } }
+      responses: { "200": { description: "{ active, accountNames }" } }
+
+  /api/storage/info:
+    get:
+      tags: [media]
+      summary: Data directory, file counts and quota
+      responses: { "200": { description: "{ dataDir, mediaDir, exists, dateFolders, totalFiles, totalBytes, maxFileBytes }" } }
+
+  /api/storage/media/dates:
+    get:
+      tags: [media]
+      summary: Date folders, newest first
+      responses: { "200": { description: "[{ date, files, bytes }]" } }
+
+  /api/storage/media:
+    get:
+      tags: [media]
+      summary: List files in a date folder
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" } }
+      responses: { "200": { description: "[{ date, name, size, type, modifiedAt, url }]" } }
+    post:
+      tags: [media]
+      summary: Upload one file as raw bytes (not JSON)
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+      requestBody:
+        description: Raw file bytes; send a Content-Type header (any value works)
+        content: { application/octet-stream: { schema: { type: string, format: binary } } }
+      responses:
+        "201": { description: "Stored item { date, name, size, type, modifiedAt, url } (name may gain a -N collision suffix)" }
+        default: { $ref: "#/components/responses/ApiError" }
+    delete:
+      tags: [media]
+      summary: Delete one stored file
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+      responses: { "200": { description: "{ deleted: 'YYYY-MM-DD/name' }" } }
+
+  /api/storage/media/file:
+    get:
+      tags: [media]
+      summary: Stream a stored file (range requests supported)
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+      responses: { "200": { description: "File bytes" } }
+
+  /api/storage/thumbnail:
+    get:
+      tags: [media]
+      summary: Cached WebP thumbnail of a stored image
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+        - { in: query, name: w, schema: { type: integer, default: 480 } }
+      responses: { "200": { description: "image/webp" } }
+
+  /api/storage/video-thumbnail:
+    get:
+      tags: [media]
+      summary: Poster frame of a stored video (ffmpeg)
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+        - { in: query, name: w, schema: { type: integer } }
+        - { in: query, name: t, schema: { type: number, description: "seconds into the video" } }
+      responses: { "200": { description: "image/jpeg" } }
+
+  /api/storage/stream:
+    get:
+      tags: [media]
+      summary: Browser-playable copy of a stored video (202 while converting)
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "Video bytes" }
+        "202": { description: "Conversion running; poll /api/storage/stream/status" }
+
+  /api/storage/stream/status:
+    get:
+      tags: [media]
+      summary: Conversion state of a stored video
+      parameters:
+        - { in: query, name: date, required: true, schema: { type: string } }
+        - { in: query, name: name, required: true, schema: { type: string } }
+      responses: { "200": { description: "{ state: original | converting | ready | failed, percent? }" } }
+
+  /api/library/roots:
+    get:
+      tags: [library]
+      summary: Registered local folders (absolute paths, exists flag)
+      responses: { "200": { description: "[{ id, name, path, addedAt, exists }]" } }
+    post:
+      tags: [library]
+      summary: Register a folder by absolute path (loopback may paste any path; remote clients are confined to the browse roots)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [path], properties: { path: { type: string } } }
+      responses:
+        "201": { description: "New root" }
+        "200": { description: "Already registered root" }
+        default: { $ref: "#/components/responses/ApiError" }
+
+  /api/library/roots/{id}:
+    delete:
+      tags: [library]
+      summary: Unregister a root (files on disk are untouched)
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses: { "200": { description: "{ removed: id }" } }
+
+  /api/library/list:
+    get:
+      tags: [library]
+      summary: One folder inside a root — subfolders and media, in place
+      parameters:
+        - { in: query, name: root, required: true, schema: { type: string } }
+        - { in: query, name: path, schema: { type: string, description: "relative path inside the root" } }
+      responses:
+        "200":
+          description: "{ root, path, folders: [{name,path}], files: [LibraryFile], truncated }"
+
+  /api/library/file:
+    get:
+      tags: [library]
+      summary: Stream a library file (ranges supported)
+      parameters:
+        - { in: query, name: root, required: true, schema: { type: string } }
+        - { in: query, name: path, required: true, schema: { type: string } }
+      responses: { "200": { description: "File bytes" } }
+
+  /api/library/thumbnail:
+    get:
+      tags: [library]
+      summary: Cached WebP thumbnail of a library image
+      parameters:
+        - { in: query, name: root, required: true, schema: { type: string } }
+        - { in: query, name: path, required: true, schema: { type: string } }
+        - { in: query, name: w, schema: { type: integer, default: 480 } }
+      responses: { "200": { description: "image/webp" } }
+
+  /api/library/video-thumbnail:
+    get:
+      tags: [library]
+      summary: Poster frame of a library video
+      parameters:
+        - { in: query, name: root, required: true, schema: { type: string } }
+        - { in: query, name: path, required: true, schema: { type: string } }
+        - { in: query, name: w, schema: { type: integer } }
+        - { in: query, name: t, schema: { type: number } }
+      responses: { "200": { description: "image/jpeg" } }
+
+  /api/library/stream:
+    get:
+      tags: [library]
+      summary: Browser-playable copy of a library video (202 while converting)
+      parameters:
+        - { in: query, name: root, required: true, schema: { type: string } }
+        - { in: query, name: path, required: true, schema: { type: string } }
+      responses: { "200": { description: "Video bytes" } }
+
+  /api/library/stream/status:
+    get:
+      tags: [library]
+      summary: Conversion state of a library video
+      parameters:
+        - { in: query, name: root, required: true, schema: { type: string } }
+        - { in: query, name: path, required: true, schema: { type: string } }
+      responses: { "200": { description: "{ state, percent? }" } }
+
+  /api/library/pick-folder:
+    post:
+      tags: [browse]
+      summary: Open the native folder dialog on the machine running the backend (5 min timeout, one dialog at a time)
+      responses:
+        "200": { description: "{ canceled: true } or { canceled: false, path }" }
+        "403": { description: "Browsing disabled or remote client not allowed" }
+        "409": { description: "A picker is already open" }
+        "501": { description: "No native picker backend available" }
+
+  /api/fs/dirs:
+    get:
+      tags: [browse]
+      summary: Server-side directory listing for the folder browser, confined to the browse roots
+      parameters:
+        - { in: query, name: path, schema: { type: string, description: "absolute path; empty selects the first browse root" } }
+      responses:
+        "200":
+          description: "{ path, name, parent, isRoot, limit, places: [{name,path,kind}], entries: [{name,path}], truncated }"
+        default: { $ref: "#/components/responses/ApiError" }
+
+  /api/fs/folder-picker:
+    get:
+      tags: [browse]
+      summary: Which native picker backend exists on the server (capability probe, never gated)
+      parameters: [{ in: query, name: refresh, schema: { type: string, enum: ["1"] } }]
+      responses:
+        "200":
+          description: "{ platform, available, backend, detail }"
+
+  /api/imports:
+    post:
+      tags: [imports]
+      summary: Upload one file into an imported collection (copies bytes to the server); the collection auto-registers as a library root
+      parameters:
+        - { in: query, name: collection, required: true, schema: { type: string, description: "folder name for the collection" } }
+        - { in: query, name: path, required: true, schema: { type: string, description: "relative path inside the collection, slashes allowed, .. refused" } }
+      requestBody:
+        description: Raw file bytes
+        content: { application/octet-stream: { schema: { type: string, format: binary } } }
+      responses:
+        "201": { description: "{ collection, root, path, size, type }" }
+        default: { $ref: "#/components/responses/ApiError" }
+    get:
+      tags: [imports]
+      summary: Imported collections with file counts and bytes
+      responses: { "200": { description: "[{ name, files, bytes }]" } }
+
+  /api/posts:
+    get:
+      tags: [posts]
+      summary: All posts with computed mediaRefs and publish warnings
+      responses: { "200": { description: "[Post]" } }
+    post:
+      tags: [posts]
+      summary: Create one post. Optional inline base64 media (small files) and instant publish.
+      description: >
+        media items are either references to already-stored files
+        (folderDate+name for the universal store, or libraryRootId+libraryPath
+        for indexed/imported folders) or inline objects carrying `data` as a
+        base64 data URL (jpeg/png/webp/gif/mp4/webm/mov, bounded by the 4 MB
+        JSON body limit — upload larger files via /api/imports or
+        /api/storage/media first and reference them).
+        Setting publish:true starts delivery immediately for the supported
+        platforms (Instagram, Threads) instead of waiting for publishAt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PostInput" }
+      responses:
+        "201":
+          description: "{ post: Post, publish?: { started, status } }"
+        "400": { $ref: "#/components/responses/ApiError" }
+        "409": { description: "Id already exists — use PUT /api/posts/{id}" }
+
+  /api/posts/sync:
+    post:
+      tags: [posts]
+      summary: Bulk import of posts the browser holds (only ids not already known server-side are created)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { posts: { type: array, items: { $ref: "#/components/schemas/PostInput" } } } }
+      responses: { "200": { description: "{ imported: [id], skipped: [reason], posts: [Post] }" } }
+
+  /api/posts/{id}:
+    get:
+      tags: [posts]
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      responses: { "200": { description: "Post" }, default: { $ref: "#/components/responses/ApiError" } }
+    put:
+      tags: [posts]
+      summary: Edit a post (resets retry timers; failed posts regain their attempt budget)
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PostInput" }
+      responses: { "200": { description: "Post" } }
+    delete:
+      tags: [posts]
+      summary: Delete a post (also removes it from any platform where it was published)
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      responses: { "200": { description: "{ deleted: id }" } }
+
+  /api/posts/{id}/validate:
+    post:
+      tags: [publish]
+      summary: Itemized readiness checks without publishing
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      responses:
+        "200":
+          description: "{ ready, checks: [{ label, ok, detail }], mediaCount, publicBaseUrl, timezone, publishAt }"
+
+  /api/posts/{id}/publish:
+    post:
+      tags: [publish]
+      summary: Start delivery now (async; poll the post for per-platform results)
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                platforms: { type: array, items: { type: string, enum: [instagram, facebook, threads, tiktok, youtube] } }
+      responses:
+        "202": { description: "{ started: true, postId, platforms, status: 'publishing' }" }
+        "409": { description: "Already being published" }
+
+  /api/posts/{id}/unpublish:
+    post:
+      tags: [publish]
+      summary: Delete the published copy on each platform
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      responses: { "200": { description: "Post with updated results" } }
+
+  /api/posts/{id}/reset-platform:
+    post:
+      tags: [publish]
+      summary: Clear one platform's result so the post can be sent again
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      responses: { "200": { description: "Post" } }
+
+  /api/posts/{id}/refresh-links:
+    post:
+      tags: [publish]
+      summary: Re-fetch permalinks for published platforms
+      parameters: [{ $ref: "#/components/parameters/PostId" }]
+      responses: { "200": { description: "Post" } }
+
+  /api/publish/log:
+    get:
+      tags: [publish]
+      summary: Publish log entries (phases, provider errors with code and fbtrace_id)
+      responses: { "200": { description: "Array of log entries" } }
+
+  /api/publish/readiness:
+    get:
+      tags: [publish]
+      summary: Scheduler state, supported platforms, connected accounts, log file path
+      responses: { "200": { description: "{ scheduler, accounts, logFile, ... }" } }
+
+  /api/public-media/{token}:
+    get:
+      tags: [media]
+      summary: Signed, TTL-bounded media download used by Meta servers; exempt from the gate
+      parameters: [{ in: path, name: token, required: true, schema: { type: string } }]
+      responses: { "200": { description: "Media bytes" } }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: relate_session
+      description: Obtained from POST /gate/login when APP_PASSWORD is set.
+
+  parameters:
+    PostId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9_.:-]{4,64}$" }
+
+  responses:
+    ApiError:
+      description: "Human-sentence error, always { error: string }"
+      content:
+        application/json:
+          schema: { type: object, properties: { error: { type: string } } }
+
+  schemas:
+    PostInput:
+      type: object
+      required: [id, platforms, scheduledDate, scheduledTime]
+      properties:
+        id: { type: string, pattern: "^[A-Za-z0-9_.:-]{4,64}$", description: "Stable client-chosen id, e.g. post-agent-2026-11-05-1" }
+        title: { type: string, maxLength: 200 }
+        campaignName: { type: string }
+        scheduledDate: { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
+        scheduledTime: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+        platforms: { type: array, minItems: 1, items: { type: string, enum: [instagram, facebook, threads, tiktok, youtube] } }
+        format: { type: string, enum: [image, video, carousel], default: image }
+        media:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              type: { type: string, description: "MIME type" }
+              size: { type: integer }
+              folderDate: { type: string, description: "Universal-store folder (reference form A)" }
+              libraryRootId: { type: string, description: "Library/import root (reference form B)" }
+              libraryPath: { type: string, description: "Relative path inside that root" }
+              data: { type: string, description: "base64 data URL for inline upload (small files only)" }
+        baseCaption: { type: string, maxLength: 20000 }
+        baseHashtags: { type: array, items: { type: string } }
+        platformOverrides:
+          type: object
+          description: "Per-platform { caption, hashtags, scheduledTime, format, firstComment, soundTitle }"
+        platformAccounts:
+          type: object
+          description: "Per-platform account id, e.g. { instagram: '1784...' }"
+        status: { type: string, enum: [draft, scheduled], default: scheduled }
+        publish: { type: boolean, description: "POST /api/posts only — deliver immediately instead of waiting for publishAt" }
+
+    Post:
+      type: object
+      description: >
+        Stored post plus diagnostics: mediaRefs [{name, kind: media|library|remote|missing}]
+        and warnings (missing media, caption limits, unsupported platform).
+        Delivery fields — results {platform: {status, platformPostId, permalink, error, ...}},
+        attempts, nextTryAt, publishAt (UTC instant of scheduledDate/Time in the server zone),
+        timezone, publishedAt.
+
+security:
+  - session: []

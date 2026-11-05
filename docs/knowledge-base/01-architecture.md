@@ -173,12 +173,36 @@ Backends are tried in order — `zenity`, `kdialog`, GTK4, the desktop portal
 on Linux; `osascript` on macOS; PowerShell on Windows. A missing backend is a
 capability gap, not an error: the UI simply does not offer the button.
 
+### 3.7 Posts, publishing, and API clients
+
+The live schedule is `<DATA_DIR>/posts.json`; browser localStorage is a
+mirror, and the backend wins when both exist (gap #25). Every route is
+documented in `docs/openapi.yaml`.
+
+`POST /api/posts` creates one post (id must not exist; edits go to
+`PUT /api/posts/:id`). Media items are references — `folderDate` + `name`
+for the universal store, `libraryRootId` + `libraryPath` for indexed or
+imported folders — or small inline base64 `data` URLs, which the server
+decodes into today's media folder and turns into references. `publish: true`
+starts delivery immediately (Instagram and Threads are the supported
+platforms; others record a `skipped` result), so an agent can create-and-send
+in one call and then poll `GET /api/posts/:id` for per-platform results.
+`POST /api/posts/:id/validate` and `GET /api/publish/readiness` return
+itemized, human-sentence checks designed for agent self-correction loops.
+
+When `APP_PASSWORD` is set, API clients authenticate with
+`POST /gate/login` and keep the `relate_session` cookie; the signed
+`/api/public-media/{token}` downloads stay exempt because platform servers
+fetch them.
+
 ---
 
 ## 4. Design constraints and invariants
 
-- **Single user, single machine.** No accounts, sessions, CSRF protection, or
-  rate limiting. Treat the backend as a local helper, not a public service.
+- **Single user, single machine.** No accounts, CSRF protection, or rate
+  limiting; an optional shared-password gate (`APP_PASSWORD`) guards all
+  routes for LAN use, but it is a deterrent, not an identity system. Treat
+  the backend as a local helper, not a public service.
 - **Secrets never enter the browser.** The client only receives masked tokens,
   account names/IDs and scopes.
 - **State split.** Posts and UI state live in the browser; tokens and media live

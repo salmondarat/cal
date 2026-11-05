@@ -139,6 +139,15 @@ Folder browsing endpoints: `GET /api/fs/dirs` (lists one folder, scoped to the
 browse roots), `GET /api/fs/folder-picker` (reports whether this computer has
 a native folder dialog).
 
+Post & publish endpoints (the live schedule is `posts.json` on the server):
+`GET /api/posts`, `GET|PUT|DELETE /api/posts/:id`, `POST /api/posts` (single
+creation — accepts inline base64 media for small files and `publish: true` to
+deliver immediately instead of waiting for the scheduled time),
+`POST /api/posts/sync` (bulk import of browser-held posts),
+`POST /api/posts/:id/publish|unpublish|validate|reset-platform|refresh-links`,
+`GET /api/publish/log`, `GET /api/publish/readiness`.
+Full request/response shapes for every route: [`docs/openapi.yaml`](docs/openapi.yaml).
+
 Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/roots/:id`,
 `GET /api/library/list?root=<id>&path=<relative>`, `GET /api/library/file?root=<id>&path=<relative>`
 (range requests supported for video), `GET /api/library/thumbnail?root=<id>&path=<relative>&w=480`,
