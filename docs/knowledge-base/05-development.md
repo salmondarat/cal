@@ -45,6 +45,8 @@ cp .env.example .env        # Windows: copy .env.example .env
 | `MEDIA_BROWSE` | library | `1` | `0`/`off`/`false`/`no` turns the folder browser off. Unset means on. |
 | `MEDIA_BROWSE_REMOTE` | library | `0` | Only `1` lets another device (phone, tunnel) browse folders. |
 | `FS_LIST_LIMIT` | library | `1000` | Max subfolders returned per listing. |
+| `PUBLISH_JITTER_MINUTES` | publishing | `0` | Humanized scheduling: a due post is held a random 0..N minutes before publishing, so the platform timestamp is not exactly the scheduled minute. `0` = publish on time. |
+| `APP_PASSWORD` | access gate | unset | When set, every `/api` and `/auth` call needs the session cookie from the password screen (LAN deterrent, not internet-grade). |
 
 `pnpm test` runs the backend route tests (`node --import tsx --test
 tests/*.test.ts`). There is no frontend test harness — the React side is

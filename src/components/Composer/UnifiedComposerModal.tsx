@@ -540,6 +540,20 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                 </div>
               </div>
 
+              {mediaList.length === 0 && selectedPlatforms.includes('threads') && effectiveFormat('threads') !== 'text' && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setBaseFormat('text');
+                    updatePlatformOverride('threads', 'format', 'text');
+                  }}
+                  className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-[#6d28d9]/40 bg-white text-[11px] font-medium text-[#6d28d9] hover:bg-[#f5f3ff] transition-colors"
+                >
+                  Or write a Text Thread — no file needed
+                </button>
+              )}
+
               {isUploading && (
                 <div className="mt-3 max-w-xs mx-auto">
                   <div className="flex items-center justify-between text-[11px] font-mono text-neutral-600 mb-1">

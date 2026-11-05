@@ -9,7 +9,9 @@ simulators before scheduling.
 > media container, waits for the platform to finish processing, publishes, and
 > records the post id, permalink, or the provider's exact error in
 > `<data dir>\logs\publish.jsonl`. A scheduler publishes at the scheduled time
-> (backend local clock, 2-hour late grace, 3 retries with backoff). "Publish
+> (backend local clock, 2-hour late grace, 3 retries with backoff), optionally
+> delayed by a random `PUBLISH_JITTER_MINUTES` window so timestamps are not
+> exactly on the minute. "Publish
 > now" sends immediately. TikTok, YouTube and Facebook pages are still
 > schedule-only — the app never pretends to have posted to them.
 >

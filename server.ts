@@ -3859,6 +3859,17 @@ async function removeFromPlatforms(postId: string): Promise<ServerPost> {
 
 const SCHEDULE_TICK_MS = Number(process.env.SCHEDULE_TICK_SECONDS || 20) * 1000;
 const SCHEDULE_GRACE_MS = Number(process.env.SCHEDULE_GRACE_MINUTES || 120) * 60_000;
+
+// Humanized scheduling: when a post comes due, hold it a random 0..N minutes
+// (PUBLISH_JITTER_MINUTES, 0 = off) so the platform timestamp is not exactly
+// the scheduled minute. The hold is assigned once per post and survives
+// restarts implicitly — a new process just re-rolls a fresh hold.
+const jitterHolds = new Map<string, number>();
+
+function jitterHoldMs(): number {
+  const minutes = Math.max(0, Number(process.env.PUBLISH_JITTER_MINUTES || 0));
+  return minutes * 60_000;
+}
 const PUBLISH_MAX_ATTEMPTS = Number(process.env.PUBLISH_MAX_ATTEMPTS || 3);
 const STALE_PUBLISHING_MS = 10 * 60_000;
 let schedulerTimer: NodeJS.Timeout | null = null;
@@ -3905,6 +3916,16 @@ async function schedulerTick(): Promise<void> {
         });
         logPublish('missed-window', { postId: post.id, lateMs, graceMs: SCHEDULE_GRACE_MS });
         continue;
+      }
+      const jitterWindow = jitterHoldMs();
+      if (jitterWindow > 0 && post.status === 'scheduled') {
+        const heldUntil = jitterHolds.get(post.id);
+        if (heldUntil === undefined) {
+          jitterHolds.set(post.id, now + Math.floor(Math.random() * jitterWindow));
+          continue;
+        }
+        if (now < heldUntil) continue;
+        jitterHolds.delete(post.id);
       }
       await publishPost(post.id, post.attempts > 0 ? 'retry' : 'scheduler');
     }
