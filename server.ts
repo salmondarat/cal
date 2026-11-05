@@ -3908,6 +3908,79 @@ function postWithDiagnostics(post: ServerPost) {
   return { ...post, mediaRefs: refs.map((r) => ({ name: r.name, kind: r.kind })), warnings };
 }
 
+// Single-post creation for API/agent clients. Same body as a sync entry,
+// with two additions: a media item may carry inline `data` (a base64 data
+// URL, up to the 4 MB JSON body limit) which is stored to today's media
+// folder first, and `publish: true` sends the post immediately instead of
+// waiting for its scheduled time. Larger files should be uploaded first
+// (POST /api/imports or /api/storage/media) and referenced by
+// folderDate+name or library fields.
+const MIME_TO_MEDIA_EXT: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+  'video/quicktime': '.mov',
+};
+
+app.post('/api/posts', (req, res) => {
+  const body = req.body || {};
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const todayFolder = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+  const mediaInput = Array.isArray(body.media) ? body.media.slice(0, 20) : [];
+  const resolvedMedia: any[] = [];
+  for (const item of mediaInput) {
+    if (item && typeof item.data === 'string' && item.data.includes(',')) {
+      const [meta, b64] = item.data.split(',');
+      const mime = meta.match(/data:([^;]+)/)?.[1] || '';
+      const ext = MIME_TO_MEDIA_EXT[mime];
+      if (!ext) {
+        return res.status(400).json({ error: 'Inline media must be jpeg, png, webp, gif, mp4, webm or mov.' });
+      }
+      const buf = Buffer.from(b64.slice(0, item.data.length), 'base64');
+      if (!buf.length) return res.status(400).json({ error: 'That inline media was empty.' });
+      if (buf.length > MAX_MEDIA_BYTES) return res.status(413).json({ error: 'That file is too large. Choose one under 1 GB.' });
+      const dir = path.join(MEDIA_DIR, todayFolder);
+      fs.mkdirSync(dir, { recursive: true });
+      const baseName = safeFileName(item.name || `upload-${Date.now()}`) || `upload-${Date.now()}`;
+      const parsed = path.parse(baseName);
+      let finalName = parsed.ext ? baseName : `${baseName}${ext}`;
+      for (let i = 1; fs.existsSync(path.join(dir, finalName)); i++) {
+        finalName = `${safeFileName(`${parsed.name || baseName}-${i}${ext}`) || `upload-${Date.now()}-${i}${ext}`}`;
+      }
+      fs.writeFileSync(path.join(dir, finalName), buf);
+      resolvedMedia.push({
+        id: `${todayFolder}/${finalName}`,
+        name: finalName,
+        type: MEDIA_MIME[ext],
+        size: buf.length,
+        url: `/api/storage/media/file?date=${todayFolder}&name=${encodeURIComponent(finalName)}`,
+        folderDate: todayFolder,
+      });
+    } else {
+      resolvedMedia.push(item);
+    }
+  }
+
+  const { post, error } = sanitizeIncomingPost({ ...body, media: resolvedMedia });
+  if (!post) return res.status(400).json({ error });
+  if (getStoredPost(post.id)) {
+    return res.status(409).json({ error: 'A post with that id already exists. Use PUT /api/posts/:id to edit it.' });
+  }
+  const saved = upsertStoredPost(post);
+
+  if (body.publish === true) {
+    const started = !inFlight.has(saved.id);
+    if (started) void publishPost(saved.id, 'manual').catch((err) => logDetail('instant publish crashed', err));
+    return res.status(201).json({ post: postWithDiagnostics(saved), publish: { started, status: started ? 'publishing' : 'already publishing' } });
+  }
+  res.status(201).json({ post: postWithDiagnostics(saved) });
+});
+
 app.get('/api/posts', (_req, res) => {
   const posts = loadPosts().map(postWithDiagnostics);
   res.json({ posts, timezone: localZone(), serverTime: new Date().toISOString(), scheduler: { tickSeconds: SCHEDULE_TICK_MS / 1000, graceMinutes: SCHEDULE_GRACE_MS / 60_000, maxAttempts: PUBLISH_MAX_ATTEMPTS, supported: SUPPORTED_PUBLISH } });

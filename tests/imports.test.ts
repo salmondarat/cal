@@ -8,6 +8,7 @@ const TMP = fs.mkdtempSync(path.join(fs.existsSync('/tmp/opencode') ? '/tmp/open
 process.env.MEDIA_NO_LISTEN = '1';
 process.env.RELATE_DATA_DIR = path.join(TMP, 'data');
 process.env.MEDIA_BROWSE_ROOTS = TMP;
+process.env.APP_PASSWORD = ''; // dotenv will not overwrite a set value
 
 const { app } = await import('../server.ts');
 

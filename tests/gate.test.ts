@@ -7,7 +7,7 @@ import path from 'node:path';
 const TMP = fs.mkdtempSync(path.join(fs.existsSync('/tmp/opencode') ? '/tmp/opencode' : os.tmpdir(), 'cal-gate-'));
 process.env.MEDIA_NO_LISTEN = '1';
 process.env.RELATE_DATA_DIR = path.join(TMP, 'data');
-delete process.env.APP_PASSWORD;
+process.env.APP_PASSWORD = ''; // dotenv will not overwrite; tests set it explicitly
 
 const { app } = await import('../server.ts');
 

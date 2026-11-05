@@ -18,6 +18,7 @@ process.env.RELATE_DATA_DIR = path.join(ROOT, 'data');
 process.env.MEDIA_BROWSE_ROOTS = ROOT;
 process.env.MEDIA_BROWSE = '1';
 process.env.MEDIA_BROWSE_REMOTE = '1';
+process.env.APP_PASSWORD = ''; // dotenv will not overwrite a set value
 
 const { app } = await import('../server.ts');
 

@@ -14,6 +14,7 @@ process.env.MEDIA_BROWSE_ROOTS = ROOT;
 process.env.MEDIA_BROWSE = '1';
 process.env.MEDIA_BROWSE_REMOTE = '1';
 process.env.FS_LIST_LIMIT = '1000';
+process.env.APP_PASSWORD = ''; // dotenv will not overwrite a set value
 
 const { app } = await import('../server.ts');
 
