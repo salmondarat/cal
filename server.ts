@@ -99,6 +99,100 @@ const app = express();
 app.use(express.json({ limit: '4mb' }));
 app.use(express.urlencoded({ extended: false }));
 
+// ---------- Access gate (LAN password) ----------
+
+const SESSION_KEY_FILE = path.join(STORE_DIR, 'session.key');
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+let sessionKey: Buffer | null = null;
+
+function getSessionKey(): Buffer {
+  if (sessionKey) return sessionKey;
+  try {
+    const existing = Buffer.from(fs.readFileSync(SESSION_KEY_FILE, 'utf8').trim(), 'hex');
+    if (existing.length === 32) {
+      sessionKey = existing;
+      return sessionKey;
+    }
+  } catch {}
+  sessionKey = crypto.randomBytes(32);
+  fs.mkdirSync(STORE_DIR, { recursive: true });
+  fs.writeFileSync(SESSION_KEY_FILE, sessionKey.toString('hex'), { mode: 0o600 });
+  return sessionKey;
+}
+
+// Read at call time so tests (and password changes) take effect immediately.
+function gateEnabled(): boolean {
+  return Boolean(String(process.env.APP_PASSWORD || '').trim());
+}
+
+// Bound to the password itself: changing APP_PASSWORD invalidates every
+// issued session.
+function expectedSessionToken(): string {
+  const digest = crypto.createHash('sha256').update(String(process.env.APP_PASSWORD || '')).digest('hex');
+  return crypto.createHmac('sha256', getSessionKey()).update(`relate-session:${digest}`).digest('base64url');
+}
+
+function hasValidSession(req: express.Request): boolean {
+  let got = '';
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const [name, ...rest] = part.trim().split('=');
+    if (name === 'relate_session') got = decodeURIComponent(rest.join('='));
+  }
+  const expected = expectedSessionToken();
+  const a = Buffer.from(got);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function gateLoginHtml(message?: string): string {
+  const safe = String(message || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<!doctype html><html><body style="font-family:sans-serif;max-width:340px;margin:60px auto;text-align:center">
+<h2>Relate Social</h2><p>This server is password protected.</p>
+${safe ? `<p style="color:#b00">${safe}</p>` : ''}
+<form id="f"><input id="p" type="password" placeholder="Password" autofocus style="padding:8px;width:70%">
+<button type="submit" style="padding:8px">Unlock</button></form>
+<script>
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const res = await fetch('/gate/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: document.getElementById('p').value }) });
+  if (res.ok) location.reload(); else location.href = '/gate/login?error=wrong';
+});
+</script></body></html>`;
+}
+
+function accessGate(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!gateEnabled()) return next();
+  const p = req.path;
+  // The login endpoints and the signed public-media downloads (fetched by
+  // Meta/TikTok servers, which hold no session) stay open.
+  if (p === '/gate/login' || p.startsWith('/gate/') || p === '/api/gate/status' || p.startsWith('/api/public-media/')) return next();
+  if (hasValidSession(req)) return next();
+  if (req.method === 'GET' && /text\/html/.test(String(req.headers.accept || ''))) {
+    return res.status(401).type('html').send(gateLoginHtml(req.query.error === 'wrong' ? 'That password is not correct.' : undefined));
+  }
+  return res.status(401).json({ error: 'This Relate Social server is password protected.' });
+}
+
+app.use(accessGate);
+
+app.post('/gate/login', (req, res) => {
+  if (!gateEnabled()) return res.json({ ok: true });
+  const given = Buffer.from(String(req.body?.password ?? ''));
+  const expectedBuf = Buffer.from(String(process.env.APP_PASSWORD || ''));
+  const ok = given.length === expectedBuf.length && crypto.timingSafeEqual(given, expectedBuf);
+  if (!ok) return res.status(401).json({ error: 'That password is not correct.' });
+  res.setHeader('Set-Cookie', `relate_session=${expectedSessionToken()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  res.json({ ok: true });
+});
+
+app.get('/gate/login', (_req, res) => {
+  res.type('html').send(gateLoginHtml(_req.query.error === 'wrong' ? 'That password is not correct.' : undefined));
+});
+
+app.get('/api/gate/status', (req, res) => {
+  res.json({ required: gateEnabled(), authenticated: !gateEnabled() || hasValidSession(req) });
+});
+
 function logDetail(scope: string, detail: unknown) {
   const text = detail instanceof Error ? detail.message : typeof detail === 'string' ? detail : 'unknown error';
   console.warn(`[relate-oauth] ${scope}: ${text}`);
@@ -2271,6 +2365,106 @@ app.delete('/api/library/roots/:id', (req, res) => {
   if (next.length === roots.length) return res.status(404).json({ error: 'That library folder is no longer available.' });
   saveLibraryRoots(next);
   res.json({ removed: req.params.id });
+});
+
+// ---------- Import from the accessing device ----------
+// Files picked in a client's browser folder picker are uploaded here and live
+// as collections under <DATA_DIR>/imports/<name>/, auto-registered as library
+// roots so every existing list/thumbnail/stream route works on them.
+
+const IMPORTS_DIR = path.join(DATA_DIR, 'imports');
+
+function safeCollectionName(name: unknown): string | null {
+  if (typeof name !== 'string' || !name.trim()) return null;
+  const cleaned = safeFileName(name.trim().replace(/[/\\]/g, '_'));
+  return cleaned && !cleaned.startsWith('.') ? cleaned : null;
+}
+
+function resolveInImport(collection: string, rel: unknown): string | null {
+  if (typeof rel !== 'string' || rel.includes('\0')) return null;
+  const base = path.resolve(IMPORTS_DIR, collection);
+  const segments = rel.replace(/^[/\\]+/, '').split(/[\/\\]+/).filter((s) => s && s !== '.');
+  if (segments.some((s) => s === '..' || s.startsWith('.'))) return null;
+  const abs = path.resolve(base, ...segments);
+  const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  return norm(abs).startsWith(norm(base) + path.sep) ? abs : null;
+}
+
+function ensureImportRoot(collection: string): LibraryRoot {
+  const importPath = path.join(IMPORTS_DIR, collection);
+  const roots = loadLibraryRoots();
+  const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const existing = roots.find((r) => norm(path.resolve(r.path)) === norm(importPath));
+  if (existing) return existing;
+  const id = crypto.createHash('sha1').update(`import:${norm(importPath)}`).digest('hex').slice(0, 10);
+  const root: LibraryRoot = { id, name: collection, path: importPath, addedAt: new Date().toISOString() };
+  saveLibraryRoots([...roots, root]);
+  return root;
+}
+
+app.post(
+  '/api/imports',
+  express.raw({ type: () => true, limit: `${MAX_MEDIA_BYTES}b` }),
+  (req, res) => {
+    const collection = safeCollectionName(req.query.collection);
+    if (!collection) return res.status(400).json({ error: 'That import folder name is not valid.' });
+    const abs = resolveInImport(collection, req.query.path);
+    if (!abs) return res.status(400).json({ error: 'That file path is not valid.' });
+    const ext = path.extname(abs).toLowerCase();
+    if (!LIBRARY_MEDIA_EXT.has(ext)) return res.status(400).json({ error: 'That file type is not supported. Choose an image or video.' });
+    const buf = req.body as Buffer;
+    if (!buf?.length) return res.status(400).json({ error: 'No file was included in the upload.' });
+    if (buf.length > MAX_MEDIA_BYTES) return res.status(413).json({ error: 'That file is too large. Choose one under 1 GB.' });
+
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    let finalAbs = abs;
+    for (let i = 1; fs.existsSync(finalAbs); i++) {
+      finalAbs = path.join(path.dirname(abs), `${path.parse(abs).name}-${i}${ext}`);
+    }
+    fs.writeFileSync(finalAbs, buf);
+    const root = ensureImportRoot(collection);
+    res.status(201).json({
+      collection,
+      root: root.id,
+      path: path.relative(path.resolve(IMPORTS_DIR, collection), finalAbs).split(path.sep).join('/'),
+      size: buf.length,
+      type: LIBRARY_MIME[ext] || 'application/octet-stream',
+    });
+  },
+);
+
+app.get('/api/imports', (_req, res) => {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(IMPORTS_DIR);
+  } catch {
+    return res.json([]);
+  }
+  const collections = names
+    .filter((n) => !n.startsWith('.'))
+    .map((name) => {
+      const dir = path.join(IMPORTS_DIR, name);
+      let files = 0;
+      let bytes = 0;
+      const walk = (d: string) => {
+        for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+          const child = path.join(d, entry.name);
+          if (entry.isDirectory()) walk(child);
+          else if (entry.isFile() && LIBRARY_MEDIA_EXT.has(path.extname(child).toLowerCase())) {
+            files++;
+            bytes += fs.statSync(child).size;
+          }
+        }
+      };
+      try {
+        if (fs.statSync(dir).isDirectory()) walk(dir);
+      } catch {
+        return null;
+      }
+      return { name, files, bytes };
+    })
+    .filter(Boolean);
+  res.json(collections);
 });
 
 app.get('/api/library/list', (req, res) => {
