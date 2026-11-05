@@ -195,6 +195,14 @@ When `APP_PASSWORD` is set, API clients authenticate with
 `/api/public-media/{token}` downloads stay exempt because platform servers
 fetch them.
 
+**Per-device library split:** the Stored tab is server-held media — date-folder
+uploads merged with `GET /api/imports/files` — and looks the same from every
+device. Library roots carry an `imported` flag; remote clients receive only
+imported roots from `GET /api/library/roots` and can only read roots under
+`<DATA_DIR>/imports/`. The server machine's own indexed folders stay
+loopback-only, and remote devices contribute media through the import path
+rather than by browsing someone else's disk.
+
 ---
 
 ## 4. Design constraints and invariants

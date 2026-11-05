@@ -107,3 +107,30 @@ test('GET /api/imports summarises collections', async () => {
   assert.ok(trip.files >= 2);
   assert.ok(trip.bytes > 0);
 });
+
+test('GET /api/imports/files lists nested media with storage-shaped urls', async () => {
+  const { status, body } = await get('/api/imports/files');
+  assert.equal(status, 200);
+  const beach = body.find((f: any) => f.collection === 'Holiday Trip' && f.path === 'day 1/beach.png');
+  assert.ok(beach, 'nested import is listed');
+  assert.match(beach.url, /^\/api\/library\/file\?root=/);
+  assert.equal(beach.type, 'image/png');
+  assert.ok(beach.thumbUrl.includes('/api/library/thumbnail'));
+});
+
+test('DELETE /api/imports removes one imported file', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  await upload('Holiday Trip', 'to-delete.png', png);
+  const params = new URLSearchParams({ collection: 'Holiday Trip', path: 'to-delete.png' });
+  const res = await fetch(`${base}/api/imports?${params.toString()}`, { method: 'DELETE' });
+  assert.equal(res.status, 200);
+  const files = await get('/api/imports/files');
+  assert.ok(!files.body.some((f: any) => f.path === 'to-delete.png'));
+});
+
+test('imported roots carry the imported flag', async () => {
+  const roots = await get('/api/library/roots');
+  const trip = roots.body.find((r: any) => r.name === 'Holiday Trip');
+  assert.ok(trip, 'collection registered as root');
+  assert.equal(trip.imported, true);
+});

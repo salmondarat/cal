@@ -110,11 +110,27 @@ function serverItemToFileEntry(entry: any): MediaItem {
 }
 
 async function getAllFromServer(): Promise<MediaItem[]> {
-  const dates: any[] = await fetch('/api/storage/media/dates').then((r) => r.json());
+  const [dates, imported] = await Promise.all([
+    fetch('/api/storage/media/dates').then((r) => r.json()) as Promise<any[]>,
+    fetch('/api/imports/files').then((r) => r.json()).catch(() => []) as Promise<any[]>,
+  ]);
   const lists = await Promise.all(
     dates.map((d) => fetch(`/api/storage/media?date=${d.date}`).then((r) => r.json())),
   );
-  return lists.flat().map(serverItemToFileEntry);
+  const importItems: MediaItem[] = imported.map((f) => ({
+    id: `import:${f.collection}/${f.path}`,
+    name: f.name,
+    url: f.url,
+    playbackUrl: f.playUrl,
+    thumbnailUrl: f.thumbUrl,
+    size: f.size,
+    type: f.type,
+    uploadedAt: f.modifiedAt,
+    serverManaged: true,
+    libraryPath: f.path,
+    libraryRoot: f.collection,
+  }));
+  return [...lists.flat().map(serverItemToFileEntry), ...importItems];
 }
 
 // ---------- IndexedDB fallback (per-origin) ----------
@@ -198,6 +214,16 @@ export async function getAllStoredMedia(): Promise<MediaItem[]> {
 }
 
 export async function deleteStoredMediaItem(id: string): Promise<void> {
+  if (id.startsWith('import:') && (await serverAvailable())) {
+    const rest = id.slice('import:'.length);
+    const sep = rest.indexOf('/');
+    const collection = rest.slice(0, sep);
+    const relPath = rest.slice(sep + 1);
+    const params = new URLSearchParams({ collection, path: relPath });
+    const res = await fetch(`/api/imports?${params.toString()}`, { method: 'DELETE' });
+    if (!res.ok) console.warn('That media item could not be removed from shared storage.');
+    return;
+  }
   if (id.includes('/') && (await serverAvailable())) {
     const [date, name] = id.split('/');
     const res = await fetch(`/api/storage/media?date=${date}&name=${encodeURIComponent(name)}`, {

@@ -321,6 +321,23 @@ paths:
       summary: Imported collections with file counts and bytes
       responses: { "200": { description: "[{ name, files, bytes }]" } }
 
+  /api/imports/files:
+    get:
+      tags: [imports]
+      summary: All media inside imported collections, flattened and shaped like /api/storage/media entries — this is what the Stored tab merges in
+      responses: { "200": { description: "[{ collection, path, name, size, type, modifiedAt, url, playUrl?, thumbUrl? }]" } }
+
+  /api/imports/{file}:
+    delete:
+      tags: [imports]
+      summary: Remove one imported file (the collection root stays)
+      parameters:
+        - { in: query, name: collection, required: true, schema: { type: string } }
+        - { in: query, name: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "{ deleted: 'collection/path' }" }
+        "404": { description: "File not found" }
+
   /api/posts:
     get:
       tags: [posts]

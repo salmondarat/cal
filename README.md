@@ -156,16 +156,26 @@ skipped", not "a transient error"; retrying will not help.** Check
 Full request/response shapes for every route: [`docs/openapi.yaml`](docs/openapi.yaml).
 
 Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/roots/:id`,
-`GET /api/library/list?root=<id>&path=<relative>`, `GET /api/library/file?root=<id>&path=<relative>`
-(range requests supported for video), `GET /api/library/thumbnail?root=<id>&path=<relative>&w=480`,
+`GET /api/library/list?root=<id>&path=<relative>`, `GET /api/library/file?root=<id>&path=<relative>`(range requests supported for video), `GET /api/library/thumbnail?root=<id>&path=<relative>&w=480`,
 `GET /api/library/video-thumbnail?root=<id>&path=<relative>&w=480&t=<seconds>`,
 `GET /api/library/stream?root=<id>&path=<relative>` (browser-playable copy; `202` while converting),
 `GET /api/library/stream/status?root=<id>&path=<relative>` (`original` | `converting` + `percent` | `ready` | `failed`),
 `POST /api/library/pick-folder` (opens the native folder dialog on the machine running the
 backend). Device folder import: `POST /api/imports?collection=<name>&path=<relative path>`
 (raw bytes; files land in `<DATA_DIR>/imports/<collection>/<path>` and the collection is
-auto-registered as a library root) and `GET /api/imports` (collection summaries). Access gate:
+auto-registered as a library root), `GET /api/imports` (collection summaries),
+`GET /api/imports/files` (flattened media list — merged into the **Stored** tab, because
+imported media is server-held data) and `DELETE /api/imports?collection=&path=` (one file).
+Access gate:
 `POST /gate/login`, `GET /api/gate/status` (both exempt from the gate itself). The same `thumbnail` / `video-thumbnail` / `stream` / `stream/status` set exists under `/api/storage/*`.
+
+How the two library tabs divide work across devices: **Stored** lists everything the
+server physically holds — uploads in the date folders plus all imported collections —
+and is identical on every device. **Local Folders** browses the accessing device's own
+situation: on the computer running the app it shows that machine's indexed folders; on
+any other device it offers "Import folder from this device" instead, because the
+server's private folders stay private and the phone's own files can only reach the
+library by being copied up.
 
 Clips that Chrome cannot decode are converted once and cached in
 `%LOCALAPPDATA%\RelateSocial\streams\`: HE-AAC / xHE-AAC audio is remuxed to AAC-LC (this is

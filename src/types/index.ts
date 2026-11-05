@@ -51,6 +51,7 @@ export interface LibraryRoot {
   path: string;
   addedAt: string;
   exists: boolean;
+  imported?: boolean;
 }
 
 export interface LibraryFolder {

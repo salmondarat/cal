@@ -274,7 +274,7 @@ memory, so a 1 GB upload costs ~1 GB of backend RAM.
 | --- | --- |
 | `getMediaStorageInfo` | 2 s-timeout probe of `/api/storage/info` |
 | `saveMediaItemToStorage(item, date?)` | server upload → IndexedDB → localStorage metadata |
-| `getAllStoredMedia()` | server scan → IndexedDB → localStorage |
+| `getAllStoredMedia()` | server scan (date folders **plus** `GET /api/imports/files`) → IndexedDB → localStorage |
 | `deleteStoredMediaItem(id)` | server delete when id contains `/`, else IndexedDB |
 | `clearAllStoredMedia()` | delete every server file, or clear IndexedDB |
 | `fileToBase64(file)` | exported helper, currently unused |

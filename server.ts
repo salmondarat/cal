@@ -2307,24 +2307,35 @@ export function createPickerGate() {
 
 const pickerGate = createPickerGate();
 
-app.get('/api/library/roots', (req, res) => {
-  if (!isLocalRequest(req)) {
-    const blocked = browseGuard(req);
-    if (blocked) return res.status(403).json({ error: blocked });
+function isImportPath(candidate: string): boolean {
+  let target: string;
+  let base: string;
+  try {
+    target = fs.realpathSync(candidate);
+    base = fs.realpathSync(IMPORTS_DIR);
+  } catch {
+    return false;
   }
-  res.json(
-    loadLibraryRoots().map((r) => ({ ...r, exists: fs.existsSync(r.path) })),
-  );
+  const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const a = norm(target);
+  const b = norm(base);
+  return a === b || a.startsWith(b + path.sep);
+}
+
+// Remote clients see the shared parts of the library: the universal store and
+// imported collections. Folders indexed from the server machine's own disk
+// stay loopback-only — a phone browsing them would browse someone else's
+// computer, which is exactly what this UI is not for.
+app.get('/api/library/roots', (req, res) => {
+  const roots = loadLibraryRoots().map((r) => ({ ...r, exists: fs.existsSync(r.path), imported: isImportPath(r.path) }));
+  if (isLocalRequest(req)) return res.json(roots);
+  res.json(roots.filter((r) => r.imported));
 });
 
-// Remote clients may only read roots that live inside the browse roots; the
-// loopback client keeps the paste-any-path affordance the UI documents.
 function libraryReadGuard(req: express.Request, rootPath: string): string | null {
   if (isLocalRequest(req)) return null;
-  return browseGuard(req)
-    ?? (isInsideRoot(rootPath, browseRoots())
-      ? null
-      : 'That folder is outside the folders this app is allowed to browse.');
+  if (isImportPath(rootPath)) return null;
+  return 'This folder lives on the computer running Relate Social and is only available there. Import a folder to share it across devices.';
 }
 
 app.post('/api/library/roots', (req, res) => {
@@ -2332,12 +2343,10 @@ app.post('/api/library/roots', (req, res) => {
   if (!raw.trim()) return res.status(400).json({ error: 'Enter a folder path first.' });
   const abs = expandUserPath(raw);
   if (!isLocalRequest(req)) {
-    const blocked = browseGuard(req);
-    if (blocked) return res.status(403).json({ error: blocked });
-    // Textual scope check before stat, so a remote probe cannot learn whether
-    // an out-of-scope path exists (it gets 403 either way).
-    if (!isPathInside(abs, browseRoots())) {
-      return res.status(403).json({ error: 'That folder is outside the folders this app is allowed to browse.' });
+    // Remote devices may only register imported collections; the server
+    // machine's own folders are added from the server, never over the wire.
+    if (!isPathInside(abs, [{ name: 'imports', path: IMPORTS_DIR, kind: 'custom' }])) {
+      return res.status(403).json({ error: 'Folders from other devices are added by importing them, not by path.' });
     }
   }
   let st: fs.Stats;
@@ -2347,8 +2356,8 @@ app.post('/api/library/roots', (req, res) => {
     return res.status(404).json({ error: 'That folder could not be found. Check the path and try again.' });
   }
   if (!st.isDirectory()) return res.status(400).json({ error: 'That path points to a file, not a folder.' });
-  if (!isLocalRequest(req) && !isInsideRoot(abs, browseRoots())) {
-    return res.status(403).json({ error: 'That folder is outside the folders this app is allowed to browse.' });
+  if (!isLocalRequest(req) && !isImportPath(abs)) {
+    return res.status(403).json({ error: 'Folders from other devices are added by importing them, not by path.' });
   }
 
   const roots = loadLibraryRoots();
@@ -2369,11 +2378,11 @@ app.post('/api/library/roots', (req, res) => {
 });
 
 app.delete('/api/library/roots/:id', (req, res) => {
-  if (!isLocalRequest(req)) {
-    const blocked = browseGuard(req);
-    if (blocked) return res.status(403).json({ error: blocked });
-  }
   const roots = loadLibraryRoots();
+  const target = roots.find((r) => r.id === req.params.id);
+  if (target && !isLocalRequest(req) && !isImportPath(target.path)) {
+    return res.status(403).json({ error: 'This folder lives on the computer running Relate Social and is only available there. Import a folder to share it across devices.' });
+  }
   const next = roots.filter((r) => r.id !== req.params.id);
   if (next.length === roots.length) return res.status(404).json({ error: 'That library folder is no longer available.' });
   saveLibraryRoots(next);
@@ -2478,6 +2487,71 @@ app.get('/api/imports', (_req, res) => {
     })
     .filter(Boolean);
   res.json(collections);
+});
+
+// Every media file inside imported collections, flattened and shaped like
+// /api/storage/media entries, so the Stored tab can show server-held media
+// (uploads + imports) in one list.
+app.get('/api/imports/files', (_req, res) => {
+  const out: any[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(IMPORTS_DIR);
+  } catch {
+    return res.json(out);
+  }
+  for (const collection of names) {
+    if (collection.startsWith('.')) continue;
+    const root = ensureImportRoot(collection);
+    const base = path.join(IMPORTS_DIR, collection);
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue;
+        const child = path.join(dir, entry.name);
+        if (entry.isDirectory()) { walk(child); continue; }
+        const ext = path.extname(child).toLowerCase();
+        if (!entry.isFile() || !LIBRARY_MEDIA_EXT.has(ext)) continue;
+        const st = fs.statSync(child);
+        const rel = path.relative(base, child).split(path.sep).join('/');
+        const encoded = encodeURIComponent(rel);
+        const fileUrl = `/api/library/file?root=${root.id}&path=${encoded}`;
+        const mime = LIBRARY_MIME[ext] || 'application/octet-stream';
+        const version = Math.round(st.mtimeMs);
+        out.push({
+          collection,
+          path: rel,
+          name: entry.name,
+          size: st.size,
+          type: mime,
+          modifiedAt: st.mtime.toISOString(),
+          url: fileUrl,
+          playUrl: mime.startsWith('video/') ? `/api/library/stream?root=${root.id}&path=${encoded}` : undefined,
+          thumbUrl: mime.startsWith('video/')
+            ? `/api/library/video-thumbnail?root=${root.id}&path=${encoded}&w=${THUMB_WIDTH}&v=${version}`
+            : isThumbnailableImage(entry.name)
+              ? `/api/library/thumbnail?root=${root.id}&path=${encoded}&w=${THUMB_WIDTH}&v=${version}`
+              : undefined,
+        });
+      }
+    };
+    try {
+      if (fs.statSync(base).isDirectory()) walk(base);
+    } catch { /* collection vanished mid-request */ }
+  }
+  res.json(out);
+});
+
+app.delete('/api/imports', (req, res) => {
+  const collection = safeCollectionName(req.query.collection);
+  if (!collection) return res.status(400).json({ error: 'That import folder name is not valid.' });
+  const abs = resolveInImport(collection, req.query.path);
+  if (!abs) return res.status(400).json({ error: 'That file path is not valid.' });
+  try {
+    fs.unlinkSync(abs);
+  } catch {
+    return res.status(404).json({ error: 'That file could not be found.' });
+  }
+  res.json({ deleted: `${collection}/${String(req.query.path)}` });
 });
 
 app.get('/api/library/list', (req, res) => {

@@ -55,33 +55,35 @@ function request(method: string, p: string, host: string, body?: unknown): Promi
 }
 
 const REMOTE = 'example.com';
-const OUTSIDE_MSG = 'That folder is outside the folders this app is allowed to browse.';
-const REMOTE_OFF_MSG = "Folder browsing from other devices isn't turned on for this computer. Ask whoever runs Relate Social there to allow access from other devices, or paste the folder path instead.";
+const IMPORT_MSG = 'Folders from other devices are added by importing them, not by path.';
+const HOST_ONLY_MSG = 'This folder lives on the computer running Relate Social and is only available there. Import a folder to share it across devices.';
+const IMPORTS = path.join(ROOT, 'data', 'imports');
 
-test('a remote client cannot register a root outside the browse roots', async () => {
+test('a remote client cannot register a host folder by path', async () => {
   const { status, body } = await request('POST', '/api/library/roots', REMOTE, { path: OUTSIDE });
   assert.equal(status, 403);
-  assert.equal(body.error, OUTSIDE_MSG);
+  assert.equal(body.error, IMPORT_MSG);
 });
 
 test('traversal-shaped remote registration is refused before the filesystem is probed', async () => {
   const { status, body } = await request('POST', '/api/library/roots', REMOTE, { path: path.join(ROOT, '..', 'etc') });
   assert.equal(status, 403);
-  assert.equal(body.error, OUTSIDE_MSG);
+  assert.equal(body.error, IMPORT_MSG);
 });
 
-test('a remote client with remote browsing off cannot register any root', async () => {
+test('remote registration is refused even inside the browse roots — imports only', async () => {
   process.env.MEDIA_BROWSE_REMOTE = '0';
   const { status, body } = await request('POST', '/api/library/roots', REMOTE, { path: path.join(ROOT, 'clips') });
   assert.equal(status, 403);
-  assert.equal(body.error, REMOTE_OFF_MSG);
+  assert.equal(body.error, IMPORT_MSG);
   process.env.MEDIA_BROWSE_REMOTE = '1';
 });
 
-test('a remote client may register a root inside the browse roots', async () => {
-  const { status, body } = await request('POST', '/api/library/roots', REMOTE, { path: path.join(ROOT, 'clips') });
+test('a remote client may register a collection inside the imports directory', async () => {
+  fs.mkdirSync(path.join(IMPORTS, 'clips'), { recursive: true });
+  const { status, body } = await request('POST', '/api/library/roots', REMOTE, { path: path.join(IMPORTS, 'clips') });
   assert.equal(status, 201);
-  assert.equal(body.path, path.join(ROOT, 'clips'));
+  assert.equal(body.path, path.join(IMPORTS, 'clips'));
 });
 
 test('the loopback client keeps paste-any-path freedom', async () => {
@@ -90,28 +92,32 @@ test('the loopback client keeps paste-any-path freedom', async () => {
   assert.equal(body.path, OUTSIDE);
 });
 
-test('a remote client cannot read a root outside the browse roots', async () => {
+test('remote clients see only imported collections in the root list', async () => {
+  const remote = await request('GET', '/api/library/roots', REMOTE, undefined);
+  assert.equal(remote.status, 200);
+  const names = remote.body.map((r: any) => r.path);
+  assert.ok(names.some((p: string) => p.startsWith(IMPORTS)), 'imports collection visible');
+  assert.ok(!names.includes(OUTSIDE), 'host root hidden from remote');
+  assert.ok(!names.includes(path.join(ROOT, 'clips')) || names.includes(path.join(IMPORTS, 'clips')));
+});
+
+test('a remote client cannot read a host root but can read an imported one', async () => {
   const roots = await request('GET', '/api/library/roots', 'localhost', undefined);
   const outsideRoot = roots.body.find((r: any) => r.path === OUTSIDE);
-  assert.ok(outsideRoot, 'loopback registration should be listed');
   const { status, body } = await request('GET', `/api/library/list?root=${outsideRoot.id}`, REMOTE, undefined);
   assert.equal(status, 403);
-  assert.equal(body.error, OUTSIDE_MSG);
-  const scoped = roots.body.find((r: any) => r.path === path.join(ROOT, 'clips'));
-  const ok = await request('GET', `/api/library/list?root=${scoped.id}`, REMOTE, undefined);
+  assert.equal(body.error, HOST_ONLY_MSG);
+  const importRoot = roots.body.find((r: any) => r.path === path.join(IMPORTS, 'clips'));
+  const ok = await request('GET', `/api/library/list?root=${importRoot.id}`, REMOTE, undefined);
   assert.equal(ok.status, 200);
 });
 
-test('a remote client cannot read files or list roots when remote browsing is off', async () => {
+test('imported collections stay reachable with remote browsing off', async () => {
   process.env.MEDIA_BROWSE_REMOTE = '0';
-  const roots = await request('GET', '/api/library/roots', REMOTE, undefined);
-  assert.equal(roots.status, 403);
-  assert.equal(roots.body.error, REMOTE_OFF_MSG);
-  const local = await request('GET', '/api/library/roots', 'localhost', undefined);
-  const inside = local.body.find((r: any) => r.path === path.join(ROOT, 'clips'));
-  const file = await request('GET', `/api/library/file?root=${inside.id}&path=a.txt`, REMOTE, undefined);
-  assert.equal(file.status, 403);
-  assert.equal(file.body.error, REMOTE_OFF_MSG);
+  const roots = await request('GET', '/api/library/roots', 'localhost', undefined);
+  const importRoot = roots.body.find((r: any) => r.path === path.join(IMPORTS, 'clips'));
+  const listed = await request('GET', `/api/library/list?root=${importRoot.id}`, REMOTE, undefined);
+  assert.equal(listed.status, 200);
   process.env.MEDIA_BROWSE_REMOTE = '1';
 });
 
