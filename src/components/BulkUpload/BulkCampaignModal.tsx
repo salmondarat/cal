@@ -337,7 +337,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
               />
               <UploadCloud className="w-7 h-7 text-[#6d28d9] mx-auto mb-1.5" />
               <div className="text-xs font-semibold text-neutral-800">
-                Drop multiple videos or images here (up to 1.0 GB total)
+                Drop multiple videos or images here (each file up to 1 GB)
               </div>
               <div className="text-[11px] text-neutral-500 mt-0.5">
                 Each file will be scheduled as a sequential post according to your cadence

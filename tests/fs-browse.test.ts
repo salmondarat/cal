@@ -151,7 +151,7 @@ test('refuses a remote host when MEDIA_BROWSE_REMOTE is off', async () => {
   try {
     const { status, body } = await getWithHost('/api/fs/dirs', 'example.com');
     assert.equal(status, 403);
-    assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+    assert.equal(body.error, "Folder browsing from other devices isn't turned on for this computer. Ask whoever runs Relate Social there to allow access from other devices, or paste the folder path instead.");
   } finally {
     restoreEnv('MEDIA_BROWSE_REMOTE', previous);
   }
@@ -204,7 +204,7 @@ test('a forwarded request is not local even with a loopback Host', async () => {
   try {
     const { status, body } = await getWithHost('/api/fs/dirs', '127.0.0.1', { 'x-forwarded-for': '203.0.113.7' });
     assert.equal(status, 403);
-    assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+    assert.equal(body.error, "Folder browsing from other devices isn't turned on for this computer. Ask whoever runs Relate Social there to allow access from other devices, or paste the folder path instead.");
   } finally {
     restoreEnv('MEDIA_BROWSE_REMOTE', previous);
   }
@@ -216,7 +216,7 @@ test('a non-loopback Origin is not local even with a loopback Host', async () =>
   try {
     const { status, body } = await getWithHost('/api/fs/dirs', '127.0.0.1', { origin: 'https://evil.example.com' });
     assert.equal(status, 403);
-    assert.equal(body.error, 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.');
+    assert.equal(body.error, "Folder browsing from other devices isn't turned on for this computer. Ask whoever runs Relate Social there to allow access from other devices, or paste the folder path instead.");
   } finally {
     restoreEnv('MEDIA_BROWSE_REMOTE', previous);
   }

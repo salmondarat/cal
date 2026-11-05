@@ -29,6 +29,7 @@ import { friendlyErrorTitle } from '../../utils/explainError';
 import { MediaThumb } from './MediaThumb';
 import { MediaPreviewModal } from './MediaPreviewModal';
 import {
+  getMediaStorageInfo,
   saveMediaItemToStorage,
   deleteStoredMediaItem,
   clearAllStoredMedia,
@@ -55,8 +56,6 @@ interface MediaLibraryModalProps {
   onMediaListChange: (updated: MediaItem[]) => void;
   onSelectMediaForPost: (item: MediaItem) => void;
 }
-
-const MAX_STORAGE_POOL = 1024 * 1024 * 1024; // 1 GB pool
 
 const formatDate = (iso?: string) => {
   if (!iso) return '';
@@ -104,6 +103,7 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   const [refreshTick, setRefreshTick] = useState(0);
   const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
   const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [storageInfo, setStorageInfo] = useState<{ diskFreeBytes: number | null; diskTotalBytes: number | null } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const rootsLoadedRef = useRef(false);
@@ -126,6 +126,7 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
     if (!isOpen || rootsLoadedRef.current) return;
     rootsLoadedRef.current = true;
     loadRoots();
+    getMediaStorageInfo().then((info) => setStorageInfo(info));
   }, [isOpen]);
 
   // The native dialog opens on the machine running the app, not on the one
@@ -176,7 +177,9 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   if (!isOpen) return null;
 
   const totalBytes = mediaList.reduce((acc, m) => acc + m.size, 0);
-  const usagePercentage = Math.min(100, Math.round((totalBytes / MAX_STORAGE_POOL) * 100));
+  const diskUsagePct = storageInfo?.diskTotalBytes
+    ? Math.min(100, Math.round((totalBytes / storageInfo.diskTotalBytes) * 100))
+    : null;
 
   const handleUploadFiles = async (files: FileList | File[]) => {
     setIsUploading(true);
@@ -507,7 +510,7 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
               </h3>
               <p className="text-[11px] text-neutral-500 mt-0.5">
                 {mode === 'stored'
-                  ? 'Saved locally with metadata, duration, resolution and 1.0 GB quota pool'
+                  ? 'Saved locally with metadata, duration and resolution. Each file can be up to 1 GB.'
                   : 'Scan folders on this computer and schedule from them directly'}
               </p>
             </div>
@@ -596,15 +599,18 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
               <div className="flex items-center gap-3 flex-1 max-w-md">
                 <div className="flex-1">
                   <div className="flex items-center justify-between text-xs font-mono text-neutral-600 mb-1">
-                    <span>Storage Quota Used</span>
+                    <span>Media on this machine</span>
                     <span className="font-semibold text-neutral-900">
-                      {formatBytes(totalBytes)} / 1.0 GB ({usagePercentage}%)
+                      {formatBytes(totalBytes)} stored
+                      {storageInfo?.diskFreeBytes != null
+                        ? ` · ${formatBytes(storageInfo.diskFreeBytes)} free on disk`
+                        : ''}
                     </span>
                   </div>
                   <div className="w-full h-2 bg-neutral-200 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-[#6d28d9] transition-all"
-                      style={{ width: `${Math.max(usagePercentage, 2)}%` }}
+                      style={{ width: `${Math.max(diskUsagePct ?? 2, totalBytes ? 2 : 0)}%` }}
                     />
                   </div>
                 </div>

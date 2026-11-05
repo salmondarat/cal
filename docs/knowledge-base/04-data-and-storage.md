@@ -151,8 +151,11 @@ Both are git-ignored (`.gitignore` lists `.secrets/`). See
 - Only folders matching `^\d{4}-\d{2}-\d{2}$` are visible to the API. Other
   folders are ignored, never deleted.
 - Allowed extensions: `.jpg .jpeg .png .webp .gif .mp4 .webm .mov`.
-- Per-file limit: 1,073,741,824 bytes (1 GB). There is **no total quota** on the
-  server; the 1 GB gauge in the UI is cosmetic.
+- Per-file limit: 1,073,741,824 bytes (1 GB). There is **no total quota** on
+  the server. The UI shows "Media on this machine" with stored bytes plus the
+  volume's real free space (`fs.statfs` on `DATA_DIR`, reported by
+  `/api/storage/info` as `diskFreeBytes`/`diskTotalBytes`); the bar is disk
+  usage, not a quota.
 - Files may be added manually if they follow the folder/naming rules; the API
   lists any file, assigning `application/octet-stream` to unknown extensions.
 
@@ -170,7 +173,9 @@ Both are git-ignored (`.gitignore` lists `.secrets/`). See
   "dateFolders": 3,
   "totalFiles": 12,
   "totalBytes": 48201344,
-  "maxFileBytes": 1073741824
+  "maxFileBytes": 1073741824,
+  "diskFreeBytes": 412345678901,
+  "diskTotalBytes": 999468475000
 }
 ```
 

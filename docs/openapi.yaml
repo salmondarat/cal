@@ -105,7 +105,7 @@ paths:
     get:
       tags: [media]
       summary: Data directory, file counts and quota
-      responses: { "200": { description: "{ dataDir, mediaDir, exists, dateFolders, totalFiles, totalBytes, maxFileBytes }" } }
+      responses: { "200": { description: "{ dataDir, mediaDir, exists, dateFolders, totalFiles, totalBytes, maxFileBytes, diskFreeBytes, diskTotalBytes }" } }
 
   /api/storage/media/dates:
     get:

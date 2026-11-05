@@ -1317,8 +1317,19 @@ function listDateFolders(): { date: string; files: number; bytes: number }[] {
   return out.sort((a, b) => b.date.localeCompare(a.date));
 }
 
-app.get('/api/storage/info', (_req, res) => {
+app.get('/api/storage/info', async (_req, res) => {
   const dates = listDateFolders();
+  let diskFreeBytes: number | null = null;
+  let diskTotalBytes: number | null = null;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const stats = await fs.promises.statfs(DATA_DIR);
+    diskTotalBytes = stats.blocks * stats.bsize;
+    diskFreeBytes = stats.bavail * stats.bsize;
+  } catch {
+    // statfs unavailable (old Node, odd platform): the UI falls back to
+    // showing stored bytes without a free-space claim.
+  }
   res.json({
     dataDir: DATA_DIR,
     mediaDir: MEDIA_DIR,
@@ -1327,6 +1338,8 @@ app.get('/api/storage/info', (_req, res) => {
     totalFiles: dates.reduce((s, d) => s + d.files, 0),
     totalBytes: dates.reduce((s, d) => s + d.bytes, 0),
     maxFileBytes: MAX_MEDIA_BYTES,
+    diskFreeBytes,
+    diskTotalBytes,
   });
 });
 
@@ -1833,7 +1846,7 @@ function isLocalRequest(req: express.Request): boolean {
 function browseGuard(req: express.Request): string | null {
   if (!browseEnabled()) return 'Folder browsing is turned off on this computer. Paste the folder path instead.';
   if (!browseRemoteAllowed() && !isLocalRequest(req)) {
-    return 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.';
+    return 'Folder browsing from other devices isn\'t turned on for this computer. Ask whoever runs Relate Social there to allow access from other devices, or paste the folder path instead.';
   }
   return null;
 }

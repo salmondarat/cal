@@ -473,13 +473,13 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
               <label className="text-xs font-semibold text-[#1e293b] flex items-center gap-1.5">
                 <span>Upload Media Assets</span>
                 <span className="text-[10px] font-mono text-neutral-400">
-                  (Images, Videos & Carousels up to 1.0 GB)
+                  (each file up to 1 GB)
                 </span>
               </label>
 
               {totalMediaBytes > 0 && (
                 <span className="text-xs font-mono text-neutral-600 tabular-nums">
-                  {formatBytes(totalMediaBytes)} / 1.0 GB
+                  {formatBytes(totalMediaBytes)} in this post
                 </span>
               )}
             </div>
@@ -532,7 +532,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
                   Click or drag and drop images or videos here
                 </div>
                 <div className="text-[11px] text-neutral-500">
-                  Supports MP4, MOV, WebM, JPG, PNG up to <span className="font-semibold text-neutral-700">1 GB</span> per post
+                  Supports MP4, MOV, WebM, JPG, PNG up to <span className="font-semibold text-neutral-700">1 GB</span> per file
                 </div>
               </div>
 

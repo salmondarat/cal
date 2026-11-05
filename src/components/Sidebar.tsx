@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CalendarDays,
   ListChecks,
@@ -13,6 +13,7 @@ import { PlatformId, ScheduledPost } from '../types';
 import { ALL_PLATFORM_IDS, PLATFORMS } from '../constants/platforms';
 import { PlatformIcon } from './PlatformIcon';
 import { formatBytes } from '../utils/mediaUtils';
+import { getMediaStorageInfo } from '../utils/mediaStorage';
 import { localDateString } from '../utils/localDate';
 
 interface SidebarProps {
@@ -30,8 +31,6 @@ interface SidebarProps {
   onOpenBulkCampaign: () => void;
   onOpenApiSettings: () => void;
 }
-
-const STORAGE_CAP = 1024 * 1024 * 1024; // 1 GB
 
 const startOfWeek = (date: Date) => {
   const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -61,6 +60,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenBulkCampaign,
   onOpenApiSettings,
 }) => {
+  const [diskInfo, setDiskInfo] = useState<{ diskFreeBytes: number | null; diskTotalBytes: number | null } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getMediaStorageInfo().then((info) => { if (!cancelled) setDiskInfo(info); });
+    return () => { cancelled = true; };
+  }, []);
+
   const weekStart = localDateString(startOfWeek(new Date()));
   const weekEnd = localDateString(addDays(startOfWeek(new Date()), 6));
   const weekPosts = posts.filter(
@@ -79,7 +85,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ).length;
   const publishing = posts.filter((p) => p.status === 'publishing').length;
 
-  const storagePct = Math.min(100, (totalStorageBytes / STORAGE_CAP) * 100);
+  const storagePct = diskInfo?.diskTotalBytes
+    ? Math.min(100, (totalStorageBytes / diskInfo.diskTotalBytes) * 100)
+    : 0;
 
   const serviceLabel =
     backendOnline === null
@@ -268,10 +276,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
             <div className="mt-2.5 border-t border-[#e8ecf2] pt-2.5">
               <div className="flex justify-between text-[10.5px] text-[#5b6a80]">
-                <span>Local media</span>
-                <span className="tabular-nums">
-                  {formatBytes(totalStorageBytes)} / 1 GB
-                </span>
+                <span>Media on this machine</span>
+                <span className="tabular-nums">{formatBytes(totalStorageBytes)} stored</span>
               </div>
               <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[#edf1f6]">
                 <i
@@ -279,6 +285,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   style={{ width: `${Math.max(storagePct, totalStorageBytes ? 2 : 0)}%` }}
                 />
               </div>
+              {diskInfo?.diskFreeBytes != null && (
+                <div className="mt-1 text-[10px] text-[#8a97ab] tabular-nums">
+                  {formatBytes(diskInfo.diskFreeBytes)} free on disk
+                </div>
+              )}
             </div>
           </div>
         </div>

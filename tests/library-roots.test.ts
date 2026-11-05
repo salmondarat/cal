@@ -56,7 +56,7 @@ function request(method: string, p: string, host: string, body?: unknown): Promi
 
 const REMOTE = 'example.com';
 const OUTSIDE_MSG = 'That folder is outside the folders this app is allowed to browse.';
-const REMOTE_OFF_MSG = 'Folder browsing from other devices is turned off. Set MEDIA_BROWSE_REMOTE=1 on the computer running the app to allow it.';
+const REMOTE_OFF_MSG = "Folder browsing from other devices isn't turned on for this computer. Ask whoever runs Relate Social there to allow access from other devices, or paste the folder path instead.";
 
 test('a remote client cannot register a root outside the browse roots', async () => {
   const { status, body } = await request('POST', '/api/library/roots', REMOTE, { path: OUTSIDE });
