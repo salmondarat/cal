@@ -30,6 +30,8 @@ simulators before scheduling.
 
 - **Calendar views** — month / week / day, drag-and-drop scheduling.
 - **Unified composer** — one caption + hashtags, per-platform overrides, media attachments.
+  Threads also publishes **Text Threads** (channel format "Text Thread") — no file needed,
+  and they work even without a public media URL; other channels still require media.
 - **Bulk campaign builder** — schedule a series across platforms in one pass.
 - **Device simulators** — see how a post renders on Instagram, Facebook, Threads, TikTok and YouTube.
 - **Universal media library** — files stored on disk outside the project, organized by

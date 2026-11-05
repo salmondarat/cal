@@ -135,3 +135,49 @@ test('validate endpoint explains an agent post before publishing', async () => {
   assert.equal(v.body.ready, false);
   assert.ok(v.body.checks.some((c: any) => /No media/.test(c.detail)));
 });
+
+test('text-format Threads posts validate without media', async () => {
+  const created = await call('POST', '/api/posts', postBody('post-api-test-text-1', { platforms: ['threads'], format: 'text' }));
+  assert.equal(created.status, 201);
+  assert.equal(created.body.post.format, 'text');
+  const v = await call('POST', '/api/posts/post-api-test-text-1/validate');
+  const media = v.body.checks.find((c: any) => c.label === 'Media files');
+  assert.equal(media.ok, true);
+  assert.match(media.detail, /no file needed/i);
+  const dl = v.body.checks.find((c: any) => c.label === 'Public download');
+  assert.equal(dl.ok, true);
+});
+
+test('text format with Instagram fails the media check with a specific sentence', async () => {
+  await call('POST', '/api/posts', postBody('post-api-test-text-2', { platforms: ['instagram'], format: 'text' }));
+  const v = await call('POST', '/api/posts/post-api-test-text-2/validate');
+  const media = v.body.checks.find((c: any) => c.label === 'Media files');
+  assert.equal(media.ok, false);
+  assert.match(media.detail, /Instagram cannot take a text-only post/);
+});
+
+test('Threads Text Thread override lifts the media requirement (the composer path)', async () => {
+  await call('POST', '/api/posts', postBody('post-api-test-text-3', {
+    platforms: ['threads'],
+    format: 'image',
+    platformOverrides: { threads: { caption: 'words only', hashtags: [], scheduledTime: '09:00', format: 'text' } },
+    media: [],
+  }));
+  const v = await call('POST', '/api/posts/post-api-test-text-3/validate');
+  const media = v.body.checks.find((c: any) => c.label === 'Media files');
+  assert.equal(media.ok, true);
+  assert.match(media.detail, /no file needed/i);
+});
+
+test('Text Thread override with other channels still requires media', async () => {
+  await call('POST', '/api/posts', postBody('post-api-test-text-4', {
+    platforms: ['threads', 'instagram'],
+    format: 'image',
+    platformOverrides: { threads: { caption: 'words', hashtags: [], scheduledTime: '09:00', format: 'text' } },
+    media: [],
+  }));
+  const v = await call('POST', '/api/posts/post-api-test-text-4/validate');
+  const media = v.body.checks.find((c: any) => c.label === 'Media files');
+  assert.equal(media.ok, false);
+  assert.match(media.detail, /Threads-only/);
+});

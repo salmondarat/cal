@@ -308,7 +308,11 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   };
 
   const blockingIssues: string[] = [];
-  if (!mediaList.length) blockingIssues.push('Attach at least one image or video.');
+  const effectiveFormat = (pId: PlatformId) => platformOverrides[pId]?.format ?? baseFormat;
+  const needsMedia = selectedPlatforms.some((pId) => !(pId === 'threads' && effectiveFormat(pId) === 'text'));
+  if (!mediaList.length && needsMedia) {
+    blockingIssues.push('Attach at least one image or video — or set the Threads channel format to Text Thread.');
+  }
   const browserOnly = mediaList.filter((m) => !m.serverManaged);
   if (browserOnly.length) {
     blockingIssues.push(

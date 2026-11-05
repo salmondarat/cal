@@ -3507,7 +3507,13 @@ async function publishInstagram(post: ServerPost): Promise<PlatformResult> {
   const format = override?.format || post.format;
   const caption = buildCaption(post, 'instagram');
   const refs = postMediaRefs(post);
-  if (!refs.length) throw new Error('This post has no media attached, so there is nothing to publish to Instagram.');
+  if (!refs.length) {
+    throw new Error(
+      format === 'text'
+        ? 'Instagram cannot publish a text-only post in this build — attach media or remove Instagram from the post.'
+        : 'This post has no media attached, so there is nothing to publish to Instagram.',
+    );
+  }
   const urls = await readyPublicUrls(refs);
 
   const media = async (params: Record<string, string>, timeoutMs: number) => {
@@ -3646,7 +3652,11 @@ async function publishThreads(post: ServerPost): Promise<PlatformResult> {
   };
 
   let containerId: string;
-  if (format === 'carousel') {
+  if (format === 'text') {
+    if (!text.trim()) throw new Error('A Text Thread needs some text.');
+    // Text-only container: just `text`, no media_type — same create→publish flow.
+    containerId = await createContainer({ text }, 'threads/create-text', 90_000);
+  } else if (format === 'carousel') {
     if (urls.length < 2) throw new Error('A Threads carousel needs at least 2 files.');
     if (refs.length > 20) throw new Error(`A Threads carousel holds at most 20 files; this post has ${refs.length}.`);
     const children: string[] = [];
@@ -3953,7 +3963,7 @@ function sanitizeIncomingPost(body: any, existing?: ServerPost): { post?: Server
     scheduledDate: String(body.scheduledDate),
     scheduledTime: String(body.scheduledTime),
     platforms,
-    format: ['image', 'video', 'carousel'].includes(body?.format) ? body.format : 'image',
+    format: ['image', 'video', 'carousel', 'text'].includes(body?.format) ? body.format : 'image',
     media,
     baseCaption: typeof body?.baseCaption === 'string' ? body.baseCaption.slice(0, 20000) : '',
     baseHashtags: (Array.isArray(body?.baseHashtags) ? body.baseHashtags : []).filter((t: any) => typeof t === 'string').map((t: string) => t.slice(0, 100)),
@@ -3982,8 +3992,8 @@ function postWithDiagnostics(post: ServerPost) {
   for (const ref of refs) {
     if (ref.kind === 'missing') warnings.push(`"${ref.name}" is not in shared media storage — re-upload it or pick it from the media library before publishing.`);
   }
-  if (!refs.length) warnings.push('No media attached — Instagram and Threads need at least one file.');
-  if (!publicBaseUrl()) warnings.push('No public web address configured — set PUBLIC_MEDIA_BASE_URL or APP_URL to your tunnel/domain.');
+  if (!refs.length && postNeedsMedia(post)) warnings.push('No media attached — every channel except a Threads Text Thread needs at least one file.');
+  if (postNeedsMedia(post) && !publicBaseUrl()) warnings.push('No public web address configured — set PUBLIC_MEDIA_BASE_URL or APP_URL to your tunnel/domain.');
   for (const platform of post.platforms) {
     try {
       buildCaption(post, platform);
@@ -4142,20 +4152,39 @@ app.delete('/api/posts/:id', (req, res) => {
 });
 
 // Runs every pre-flight check a publish would do, without sending anything.
+function effectiveFormat(post: ServerPost, platform: PlatformKey): string {
+  return post.platforms.includes(platform) ? post.platformOverrides?.[platform]?.format || post.format : post.format;
+}
+
+// A post needs media unless every target is Threads in Text Thread format.
+function postNeedsMedia(post: ServerPost): boolean {
+  return post.platforms.some((p) => !(p === 'threads' && effectiveFormat(post, p) === 'text'));
+}
+
 async function validatePost(post: ServerPost) {
   const checks: { label: string; ok: boolean; detail: string }[] = [];
   const refs = postMediaRefs(post);
+  const needsMedia = postNeedsMedia(post);
+  const textTargets = post.platforms.some((p) => p === 'threads' && effectiveFormat(post, p) === 'text');
 
   const missing = refs.filter((r) => r.kind === 'missing');
-  checks.push({
-    label: 'Media files',
-    ok: refs.length > 0 && missing.length === 0,
-    detail: refs.length
-      ? missing.length
-        ? `${missing.length} of ${refs.length} file(s) are not on shared storage: ${missing.map((m) => m.name).join(', ')}`
-        : `${refs.length} file(s) ready (${refs.map((r) => r.kind).join(', ')})`
-      : 'No media attached.',
-  });
+  if (!needsMedia) {
+    checks.push({ label: 'Media files', ok: true, detail: 'Text Thread — no file needed.' });
+  } else {
+    checks.push({
+      label: 'Media files',
+      ok: refs.length > 0 && missing.length === 0,
+      detail: refs.length
+        ? missing.length
+          ? `${missing.length} of ${refs.length} file(s) are not on shared storage: ${missing.map((m) => m.name).join(', ')}`
+          : `${refs.length} file(s) ready (${refs.map((r) => r.kind).join(', ')})`
+        : textTargets
+          ? 'Text Thread is Threads-only — the other channels need at least one file.'
+          : post.format === 'text'
+            ? 'Instagram cannot take a text-only post — attach media or remove Instagram from the post.'
+            : 'No media attached.',
+    });
+  }
 
   const urls: string[] = [];
   let urlCheckOk = refs.length > 0 && missing.length === 0;
@@ -4178,7 +4207,11 @@ async function validatePost(post: ServerPost) {
       urlDetail = `${urls.length} file(s) downloadable by the platform through ${publicBaseUrl()}`;
     }
   }
-  checks.push({ label: 'Public download', ok: urlCheckOk && urls.length > 0, detail: urls.length ? urlDetail : urlDetail });
+  if (!needsMedia && !refs.length) {
+    checks.push({ label: 'Public download', ok: true, detail: 'Nothing to serve — a Text Thread publishes without a public URL.' });
+  } else {
+    checks.push({ label: 'Public download', ok: urlCheckOk && urls.length > 0, detail: urlDetail });
+  }
 
   for (const platform of post.platforms) {
     if (!SUPPORTED_PUBLISH.includes(platform)) {

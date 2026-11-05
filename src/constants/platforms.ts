@@ -46,6 +46,7 @@ export const PLATFORMS: Record<PlatformId, PlatformConfig> = {
     charLimit: 500,
     hashtagLimit: 5,
     supportedFormats: [
+      { format: 'text', label: 'Text Thread', description: 'Words only — no file needed', aspectRatio: '—' },
       { format: 'image', label: 'Photo Thread', description: 'Single high-res image with discussion', aspectRatio: '4:5' },
       { format: 'carousel', label: 'Carousel Thread', description: 'Swipeable sequence of up to 10 images', aspectRatio: '4:5' },
       { format: 'video', label: 'Video Thread', description: 'Clips up to 5 minutes duration', aspectRatio: '16:9' },

@@ -1,6 +1,6 @@
 export type PlatformId = 'instagram' | 'facebook' | 'threads' | 'tiktok' | 'youtube';
 
-export type MediaFormat = 'image' | 'video' | 'carousel';
+export type MediaFormat = 'image' | 'video' | 'carousel' | 'text';
 
 export type PostStatus =
   | 'draft'

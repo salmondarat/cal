@@ -24,7 +24,8 @@ Real (backend `server.ts`, "Publishing" sections):
   Page): create container → poll `status_code` until `FINISHED` →
   `media_publish` → read `permalink`. Feed image, Reel, and carousel (child
   containers with `is_carousel_item=true`, then a `CAROUSEL` parent).
-- Threads: image thread, video container + `container_id`, carousel children.
+- Threads: text-only thread (container with just `text` — no file, no public
+  URL needed), image thread, video container + `container_id`, carousel children.
 - `POST /api/posts/:id/unpublish` deletes what was published
   (`DELETE /{ig-id}/media?media_id=…`, `DELETE /{threads-id}?id=…`) and keeps
   the record with `deletedAt`.
