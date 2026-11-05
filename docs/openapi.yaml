@@ -338,6 +338,11 @@ paths:
         /api/storage/media first and reference them).
         Setting publish:true starts delivery immediately for the supported
         platforms (Instagram, Threads) instead of waiting for publishAt.
+        publish:true is refused with 400 when none of the target platforms
+        are supported by this build. Note: after delivery, an overall
+        status of "failed" with every platform result "skipped" means the
+        build cannot publish to those platforms at all — not a transient
+        error.
       requestBody:
         required: true
         content:

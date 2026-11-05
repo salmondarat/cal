@@ -146,6 +146,13 @@ deliver immediately instead of waiting for the scheduled time),
 `POST /api/posts/sync` (bulk import of browser-held posts),
 `POST /api/posts/:id/publish|unpublish|validate|reset-platform|refresh-links`,
 `GET /api/publish/log`, `GET /api/publish/readiness`.
+Status semantics to know (especially as an API client): only **Instagram and
+Threads** are sent by this build. A post whose targets are all other platforms
+is rejected outright when created with `publish: true` (400), and if it
+publishes anyway (scheduled or mixed targets), every platform records
+`skipped` and the overall status becomes **`failed` — meaning "all platforms
+skipped", not "a transient error"; retrying will not help.** Check
+`results[platform].status` to tell the two apart.
 Full request/response shapes for every route: [`docs/openapi.yaml`](docs/openapi.yaml).
 
 Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/roots/:id`,
