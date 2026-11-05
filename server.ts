@@ -3659,8 +3659,8 @@ async function publishThreads(post: ServerPost): Promise<PlatformResult> {
   let containerId: string;
   if (format === 'text') {
     if (!text.trim()) throw new Error('A Text Thread needs some text.');
-    // Text-only container: just `text`, no media_type — same create→publish flow.
-    containerId = await createContainer({ text }, 'threads/create-text', 90_000);
+    // Meta requires media_type on every container — TEXT is the text-only one.
+    containerId = await createContainer({ media_type: 'TEXT', text }, 'threads/create-text', 90_000);
   } else if (format === 'carousel') {
     if (urls.length < 2) throw new Error('A Threads carousel needs at least 2 files.');
     if (refs.length > 20) throw new Error(`A Threads carousel holds at most 20 files; this post has ${refs.length}.`);
