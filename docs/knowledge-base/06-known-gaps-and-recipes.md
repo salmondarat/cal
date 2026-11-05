@@ -86,7 +86,7 @@ Two hard requirements for a live publish:
 | 19 | ~~Unused dependencies and helpers~~ fixed | `package.json` | — | `@google/genai`, `motion`, `fileToBase64`, `detectMediaType` and the false Gemini capability claim removed |
 | 20 | Tailwind utilities from absent plugins | various components | `animate-in`, `fade-in`, `slide-in-from-bottom-3`, `scrollbar-none`, `scrollbar-thin`, `xs:` do nothing | Cosmetic; `animate-spin`/`pulse` work |
 | 21 | ~~No production backend build/start~~ fixed | `package.json` | — | `pnpm build:server` bundles `server.js` (ESM, external packages); `pnpm start` runs it |
-| 22 | Backend has no auth, binds all interfaces | `app.listen(PORT)` | Anyone reaching the port can publish, delete posts, read/write media | Now more dangerous: publish/unpublish routes act on real accounts |
+| 22 | Backend has no real auth, binds all interfaces | `app.listen(PORT)` | Anyone reaching the port can publish, delete posts, read/write media | Optional `APP_PASSWORD` gate (session cookie + login screen) added as a LAN deterrent; it is not TLS and not internet-grade. Publishing routes make real-account actions |
 | 23 | Callback HTML now escapes provider detail; receiver still accepts any origin | `server.ts` `callbackHtml` | Receiver side is the residual risk | `postMessage` origin cannot be pinned while `APP_URL` may differ from the opener's origin (tunnel vs localhost) |
 | 24 | OAuth state file and media-signing key are plaintext | `.secrets/` | Short-lived state + HMAC key for public media links | Written with mode 0600 |
 | 25 | `posts.json` is the live schedule | `<RELATE_DATA_DIR>/posts.json` | Deleting it deletes the queue | Browser localStorage is a mirror; the backend wins when both exist |

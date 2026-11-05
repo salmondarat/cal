@@ -146,7 +146,10 @@ Local folder endpoints: `GET|POST /api/library/roots`, `DELETE /api/library/root
 `GET /api/library/stream?root=<id>&path=<relative>` (browser-playable copy; `202` while converting),
 `GET /api/library/stream/status?root=<id>&path=<relative>` (`original` | `converting` + `percent` | `ready` | `failed`),
 `POST /api/library/pick-folder` (opens the native folder dialog on the machine running the
-backend). The same `thumbnail` / `video-thumbnail` / `stream` / `stream/status` set exists under `/api/storage/*`.
+backend). Device folder import: `POST /api/imports?collection=<name>&path=<relative path>`
+(raw bytes; files land in `<DATA_DIR>/imports/<collection>/<path>` and the collection is
+auto-registered as a library root) and `GET /api/imports` (collection summaries). Access gate:
+`POST /gate/login`, `GET /api/gate/status` (both exempt from the gate itself). The same `thumbnail` / `video-thumbnail` / `stream` / `stream/status` set exists under `/api/storage/*`.
 
 Clips that Chrome cannot decode are converted once and cached in
 `%LOCALAPPDATA%\RelateSocial\streams\`: HE-AAC / xHE-AAC audio is remuxed to AAC-LC (this is
@@ -173,9 +176,31 @@ Then set `APP_URL="https://<your-subdomain>.<your-domain>"` and register
 `https://<your-subdomain>.<your-domain>/auth/<provider>/callback` in each provider's
 dashboard. Keep the backend, Vite and the tunnel running while testing.
 
+## Keyboard shortcuts
+
+The shortcut layer is idle while you are typing in a field or a dialog is open.
+
+| Key | Action |
+| --- | --- |
+| `m` / `w` / `d` | Month / week / day view |
+| `←` / `→` | Previous / next period |
+| `t` | Jump to today |
+| `n` | New post at today |
+| `l` | Media library |
+| `b` | Bulk campaign |
+| `s` | API connections |
+| `Tab` | Move focus |
+| `Enter` | Activate the focused item |
+| `Esc` | Close the topmost dialog |
+| `?` | Shortcut help |
+
 ## Security notes
 
 - Never commit `.env`, `.secrets/`, or tunnel credentials — all are git-ignored.
+- Set `APP_PASSWORD` in `.env` to require a password before any device (other
+  laptops, phones, anything reaching the port) can use the app. Sessions last
+  30 days; changing the password invalidates them. Over plain HTTP this deters
+  casual access only — it is not protection over the internet.
 - The frontend only ever sees masked tokens; all secret-bearing calls happen in `server.ts`.
 - OAuth `state` values are persisted server-side and consumed once.
 - Disconnect from the settings modal deletes the stored tokens on the backend.

@@ -27,6 +27,13 @@ This is why every provider dashboard must register
 `${APP_URL}/auth/<provider>/callback`, where `APP_URL` is normally
 `http://localhost:3000` — **not** `:8787`.
 
+When `APP_PASSWORD` is set, an access-gate middleware runs before every route
+except `POST /gate/login`, `GET /api/gate/status`, and the signed
+`/api/public-media/*` downloads: unauthenticated API calls get 401 JSON and
+HTML navigations get a login page; a correct password sets a 30-day HttpOnly
+`relate_session` cookie bound to the password hash. The SPA shows a full-screen
+password prompt when the status probe reports locked.
+
 CSS/UI assets are served by Vite; the backend serves no static files.
 
 ---
