@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(pgrep -af cloudflared; ls -la ~/.cloudflared/ 2>/dev/null; cat ~/.cloudflared/config.yml 2>/dev/null; cloudflared tunnel list 2>&1 | head -8)"
-    ]
-  }
-}

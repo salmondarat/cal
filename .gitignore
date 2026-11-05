@@ -11,3 +11,6 @@ coverage/
 
 # superpowers scratch workspace (SDD ledger, briefs, review packages)
 .superpowers/
+
+# local CLI tool state
+.qoder/
