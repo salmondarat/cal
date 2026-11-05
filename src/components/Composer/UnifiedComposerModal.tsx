@@ -308,6 +308,9 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   };
 
   const blockingIssues: string[] = [];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate) || !/^\d{1,2}:\d{2}$/.test(scheduledTime)) {
+    blockingIssues.push('Pick a complete date and time for the post.');
+  }
   const effectiveFormat = (pId: PlatformId) => platformOverrides[pId]?.format ?? baseFormat;
   const needsMedia = selectedPlatforms.some((pId) => !(pId === 'threads' && effectiveFormat(pId) === 'text'));
   if (!mediaList.length && needsMedia) {

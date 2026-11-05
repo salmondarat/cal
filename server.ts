@@ -3086,8 +3086,13 @@ function localZone(): string {
 // Scheduled times are wall-clock strings typed in the calendar; the backend's
 // own clock is the authority for when a post is due.
 function computePublishAt(date: unknown, time: unknown): string | null {
-  const d = typeof date === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date) : null;
-  const t = typeof time === 'string' ? /^(\d{1,2}):(\d{2})$/.exec(time) : null;
+  // Tolerate the two shapes agents and browsers actually send: a bare
+  // YYYY-MM-DD or a full ISO timestamp (its date part is taken), and
+  // HH:mm with optional seconds.
+  const rawDate = typeof date === 'string' ? date.trim().slice(0, 10) : '';
+  const rawTime = typeof time === 'string' ? time.trim() : '';
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawDate);
+  const t = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(rawTime);
   if (!d || !t) return null;
   const dt = new Date(Number(d[1]), Number(d[2]) - 1, Number(d[3]), Number(t[1]), Number(t[2]), 0, 0);
   if (Number.isNaN(dt.getTime())) return null;

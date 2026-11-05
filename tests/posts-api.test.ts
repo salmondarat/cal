@@ -74,6 +74,21 @@ test('invalid id and missing platforms are 400', async () => {
   assert.equal((await call('POST', '/api/posts', postBody('post-api-test-2', { platforms: [] }))).status, 400);
 });
 
+test('date and time accept common format variants', async () => {
+  const iso = await call('POST', '/api/posts', postBody('post-api-test-fmt-1', {
+    scheduledDate: '2026-12-24T15:30:00.000Z', scheduledTime: '15:30',
+  }));
+  assert.equal(iso.status, 201);
+  const secs = await call('POST', '/api/posts', postBody('post-api-test-fmt-2', {
+    scheduledDate: '2026-12-25', scheduledTime: '9:05:30',
+  }));
+  assert.equal(secs.status, 201);
+  const garbage = await call('POST', '/api/posts', postBody('post-api-test-fmt-3', {
+    scheduledDate: 'December 24', scheduledTime: '3pm',
+  }));
+  assert.equal(garbage.status, 400);
+});
+
 test('inline base64 media is stored to today and referenced', async () => {
   const created = await call('POST', '/api/posts', postBody('post-api-test-3', {
     media: [{ name: 'agent-shot.png', type: 'image/png', data: `data:image/png;base64,${PNG_B64}` }],
