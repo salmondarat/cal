@@ -20,7 +20,7 @@ import { ApiSettingsModal } from './components/Settings/ApiSettingsModal';
 import { MediaLibraryModal } from './components/MediaLibrary/MediaLibraryModal';
 import { PostManagerModal } from './components/PostManager/PostManagerModal';
 import { PostDetailModal } from './components/PostManager/PostDetailModal';
-import { AlertTriangle, CalendarDays, CheckCircle2, Info, Menu, Plus } from 'lucide-react';
+import { AlertTriangle, CalendarDays, CheckCircle2, Info, Lock, Menu, Plus } from 'lucide-react';
 import { getAllStoredMedia, saveMediaItemToStorage } from './utils/mediaStorage';
 import { processFileToMediaItem, validateFileSize } from './utils/mediaUtils';
 import { localDateString } from './utils/localDate';
@@ -57,6 +57,59 @@ function upsertById(list: ScheduledPost[], next: ScheduledPost): ScheduledPost[]
   const exists = list.some((p) => p.id === next.id);
   return exists ? list.map((p) => (p.id === next.id ? next : p)) : [next, ...list];
 }
+
+const GateLockScreen: React.FC<{ onUnlocked: () => void }> = ({ onUnlocked }) => {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch('/gate/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) onUnlocked();
+      else setError('That password is not correct.');
+    } catch {
+      setError('The server could not be reached. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] bg-[#0f172a]/95 flex items-center justify-center p-4">
+      <form onSubmit={submit} className="w-full max-w-[320px] rounded-2xl bg-white p-6 shadow-2xl text-center">
+        <div className="mx-auto mb-3 h-11 w-11 rounded-full bg-[#0000ee]/10 flex items-center justify-center">
+          <Lock className="h-5 w-5 text-[#0000ee]" />
+        </div>
+        <h2 className="text-[15px] font-semibold text-[#0f172a]">Relate Social is locked</h2>
+        <p className="mt-1 text-[12px] text-[#5b6a80]">Enter this computer&apos;s password to use the app from this device.</p>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoFocus
+          className="mt-4 w-full rounded-lg border border-neutral-300 px-3 py-2 text-[13px]"
+          placeholder="Password"
+        />
+        {error && <p className="mt-2 text-[12px] text-red-600">{error}</p>}
+        <button
+          type="submit"
+          disabled={busy || !password}
+          className="mt-4 w-full rounded-lg bg-[#0000ee] py-2 text-[13px] font-semibold text-white disabled:opacity-50"
+        >
+          {busy ? 'Checking…' : 'Unlock'}
+        </button>
+      </form>
+    </div>
+  );
+};
 
 export default function App() {
   const [posts, setPosts] = useState<ScheduledPost[]>(readLocalPosts);
@@ -171,6 +224,16 @@ export default function App() {
   const [isMediaLibraryOpen, setIsMediaLibraryOpen] = useState(false);
   const [isManagerOpen, setIsManagerOpen] = useState(false);
   const [detailPost, setDetailPost] = useState<ManagedPost | null>(null);
+
+  // LAN password gate: the backend answers 401 until a session cookie is set.
+  const [gateLocked, setGateLocked] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
+  useEffect(() => {
+    fetch('/api/gate/status')
+      .then((r) => r.json())
+      .then((s: { required: boolean; authenticated: boolean }) => setGateLocked(s.required && !s.authenticated))
+      .catch(() => setGateLocked(false));
+  }, []);
 
   // Toast notification state
   const [toastMessage, setToastMessage] = useState<{
@@ -485,6 +548,55 @@ export default function App() {
   const handleToday = () => {
     setCurrentDate(new Date());
   };
+
+  // Global keyboard navigation. Typing in a field, the gate screen, or any
+  // open modal disables the layer so components keep their own keys.
+  useEffect(() => {
+    const anyModalOpen =
+      isComposerOpen || isSimulatorOpen || isBulkModalOpen || isApiSettingsOpen ||
+      isMediaLibraryOpen || isManagerOpen || Boolean(detailPost) || isRailOpen;
+    const onKey = (e: KeyboardEvent) => {
+      if (gateLocked) return;
+      if (e.key === 'Escape' && isHelpOpen) {
+        setIsHelpOpen(false);
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const typing = Boolean(target) && (/^(INPUT|TEXTAREA|SELECT)$/.test(target!.tagName) || target!.isContentEditable);
+      if (typing || anyModalOpen || isHelpOpen || e.metaKey || e.ctrlKey || e.altKey) return;
+      switch (e.key) {
+        case 'm': setViewMode('month'); break;
+        case 'w': setViewMode('week'); break;
+        case 'd': setViewMode('day'); break;
+        case 't': handleToday(); break;
+        case 'ArrowLeft': handlePrev(); break;
+        case 'ArrowRight': handleNext(); break;
+        case 'n': handleQuickAdd(localDateString()); break;
+        case 'b': setIsBulkModalOpen(true); break;
+        case 'l': setIsMediaLibraryOpen(true); break;
+        case 's': setIsApiSettingsOpen(true); break;
+        case '?': setIsHelpOpen(true); break;
+        default: return;
+      }
+      e.preventDefault();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  });
+
+  const shortcuts = [
+    ['m / w / d', 'Month, week, day view'],
+    ['← / →', 'Previous / next period'],
+    ['t', 'Jump to today'],
+    ['n', 'New post at today'],
+    ['l', 'Media library'],
+    ['b', 'Bulk campaign'],
+    ['s', 'API connections'],
+    ['Tab', 'Move focus'],
+    ['Enter', 'Activate focused item'],
+    ['Esc', 'Close dialogs'],
+    ['?', 'This help'],
+  ];
 
   const matchesQuery = (post: ScheduledPost) => {
     if (!searchQuery.trim()) return true;
@@ -936,6 +1048,29 @@ export default function App() {
           <span>{toastMessage.text}</span>
         </div>
       )}
+
+      {isHelpOpen && (
+        <div className="fixed inset-0 z-[190] bg-black/60 flex items-center justify-center p-4" onClick={() => setIsHelpOpen(false)}>
+          <div className="w-full max-w-[360px] rounded-2xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-[14px] font-semibold text-[#0f172a] mb-3">Keyboard shortcuts</h2>
+            <table className="w-full text-[12px]">
+              <tbody>
+                {shortcuts.map(([key, label]) => (
+                  <tr key={key}>
+                    <td className="py-1 pr-3 align-top">
+                      <kbd className="rounded border border-neutral-300 bg-neutral-100 px-1.5 py-0.5 text-[11px] font-mono">{key}</kbd>
+                    </td>
+                    <td className="py-1 text-[#334155]">{label}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="mt-3 text-[10px] text-neutral-400">Keys pause while typing or when a dialog is open.</p>
+          </div>
+        </div>
+      )}
+
+      {gateLocked && <GateLockScreen onUnlocked={() => window.location.reload()} />}
     </div>
   );
 }

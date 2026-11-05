@@ -40,6 +40,15 @@ export function listLibraryFolder(rootId: string, path = ''): Promise<LibraryLis
   return request<LibraryListing>(`/api/library/list?${params.toString()}`);
 }
 
+export function importFileToCollection(collection: string, relPath: string, file: File): Promise<{ collection: string; root: string; path: string; size: number }> {
+  const params = new URLSearchParams({ collection, path: relPath });
+  return request(`/api/imports?${params.toString()}`, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+}
+
 // List one folder on the server's filesystem. An empty path asks the server
 // for its first browse root; the server answers 403/404 with a human message
 // that `request` turns into the thrown Error.

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   UploadCloud,
@@ -74,6 +75,7 @@ export const UnifiedComposerModal: React.FC<UnifiedComposerModalProps> = ({
   availableStoredMedia = [],
   backendOnline = null,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [title, setTitle] = useState('');
   const [showLibraryPicker, setShowLibraryPicker] = useState(false);
   const [scheduledDate, setScheduledDate] = useState(initialDate || localDateString());

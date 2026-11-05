@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   Layers,
@@ -41,6 +42,7 @@ export const BulkCampaignModal: React.FC<BulkCampaignModalProps> = ({
   onClose,
   onScheduleBulkPosts,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [campaignName, setCampaignName] = useState('Q4 Product Innovation Blitz');
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformId[]>([
     'instagram',

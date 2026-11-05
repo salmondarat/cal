@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   Folder,
@@ -30,6 +31,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   onClose,
   onSelect,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [listing, setListing] = useState<ServerFolderListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

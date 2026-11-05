@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   Send,
@@ -112,6 +113,7 @@ export const PostDetailModal: React.FC<PostDetailModalProps> = ({
   onEdit,
   onPostUpdate,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [tab, setTab] = useState<DetailTab>('overview');
   const [log, setLog] = useState<PublishLogEntry[]>([]);
   const [checks, setChecks] = useState<ValidationCheck[] | null>(null);

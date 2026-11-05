@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   ChevronLeft,
@@ -79,6 +80,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   onSchedule,
   onDelete,
 }) => {
+  useEscapeClose(true, onClose);
   const item = items[index];
   const isVideo = Boolean(item?.type.startsWith('video/'));
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);

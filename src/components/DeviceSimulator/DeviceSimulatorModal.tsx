@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import { X, Smartphone, ArrowRight, Share2, Sparkles, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { ScheduledPost, PlatformId } from '../../types';
 import { DeviceSimulator } from './DeviceSimulator';
@@ -24,6 +25,7 @@ export const DeviceSimulatorModal: React.FC<DeviceSimulatorModalProps> = ({
   onSelectPost,
   onPublishNow,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformId>(
     post?.platforms[0] || 'instagram'
   );

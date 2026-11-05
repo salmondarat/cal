@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   Key,
@@ -56,6 +57,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   onClose,
   onSaveCredentials,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [credentials, setCredentials] = useState<Record<PlatformId, PlatformApiCredentials>>(EMPTY_CREDENTIALS);
 
   const [activeTab, setActiveTab] = useState<PlatformId>('instagram');

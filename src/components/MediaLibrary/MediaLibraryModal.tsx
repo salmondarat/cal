@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   HardDrive,
@@ -37,6 +38,7 @@ import {
   addLibraryRoot,
   getFolderPickerCapability,
   getLibraryRoots,
+  importFileToCollection,
   joinLibraryPath,
   libraryFileToMediaItem,
   listLibraryFolder,
@@ -71,6 +73,7 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   onMediaListChange,
   onSelectMediaForPost,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [mode, setMode] = useState<Mode>('stored');
   const [filterType, setFilterType] = useState<'all' | 'image' | 'video'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -99,6 +102,9 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   const [treeLoading, setTreeLoading] = useState<Record<string, boolean>>({});
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
   const [refreshTick, setRefreshTick] = useState(0);
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   const rootsLoadedRef = useRef(false);
 
@@ -254,6 +260,51 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
     setActiveRootId(root.id);
     setCurrentPath('');
     setExpandedFolders((prev) => ({ ...prev, [`${root.id}:`]: true }));
+  };
+
+  const handleImportFolder = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setLibraryError(null);
+    setImportNotice(null);
+    const media = Array.from(files).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'));
+    const skipped = files.length - media.length;
+    if (media.length === 0) {
+      setLibraryError('That folder has no images or videos to import.');
+      return;
+    }
+    // webkitRelativePath starts with the picked folder's name; that becomes the
+    // collection, the rest of the path preserves the tree.
+    const head = (media[0].webkitRelativePath || media[0].name).split('/');
+    const collection = head.length > 1 ? head[0] : `imported-${new Date().toISOString().slice(0, 10)}`;
+    let done = 0;
+    let failed = 0;
+    let rootId: string | null = null;
+    setImportProgress({ done: 0, total: media.length });
+    for (const file of media) {
+      const relFull = file.webkitRelativePath || file.name;
+      const rel = relFull.startsWith(`${collection}/`) ? relFull.slice(collection.length + 1) : relFull;
+      try {
+        const res = await importFileToCollection(collection, rel, file);
+        rootId = res.root;
+      } catch {
+        failed++;
+      }
+      done++;
+      setImportProgress({ done, total: media.length });
+    }
+    setImportProgress(null);
+    if (rootId) {
+      await loadRoots();
+      setActiveRootId(rootId);
+      setCurrentPath('');
+      setExpandedFolders((prev) => ({ ...prev, [`${rootId}:`]: true }));
+    }
+    const imported = done - failed;
+    if (imported > 0) {
+      setImportNotice(`Imported ${imported} of ${media.length} files${skipped ? `, skipped ${skipped} non-media files` : ''}.`);
+    } else {
+      setLibraryError('The import could not upload any files. Check that the backend is running.');
+    }
   };
 
   const handleAddRoot = async (e: React.FormEvent) => {
@@ -522,6 +573,18 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
           type="file"
           accept=".json,application/json"
           onChange={handleImportJSON}
+          className="hidden"
+        />
+        <input
+          ref={importInputRef}
+          type="file"
+          accept="image/*,video/*"
+          multiple
+          {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+          onChange={(e) => {
+            void handleImportFolder(e.target.files);
+            e.target.value = '';
+          }}
           className="hidden"
         />
 
@@ -878,8 +941,30 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
                       )}
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => importInputRef.current?.click()}
+                    disabled={Boolean(importProgress)}
+                    className="mt-1 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] font-medium text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50 border border-neutral-200 rounded-[6px] transition-colors"
+                    title="Pick a folder on this device and copy its media to the server"
+                  >
+                    {importProgress ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Importing {importProgress.done}/{importProgress.total}...
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="w-3.5 h-3.5" />
+                        Import folder from this device
+                      </>
+                    )}
+                  </button>
+                  {importNotice && (
+                    <p className="text-[10px] text-emerald-600 mt-1">{importNotice}</p>
+                  )}
                   <p className="text-[10px] text-neutral-400 mt-1">
-                    Browse or paste a full path. Files stay in place — nothing is copied.
+                    Browse or paste a full path. Files stay in place — nothing is copied. Imported folders are copied to the server.
                   </p>
                 </form>
               </aside>

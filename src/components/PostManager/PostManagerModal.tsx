@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useEscapeClose } from '../../utils/useEscapeClose';
 import {
   X,
   Send,
@@ -69,6 +70,7 @@ export const PostManagerModal: React.FC<PostManagerModalProps> = ({
   onEdit,
   onOpenDetail,
 }) => {
+  useEscapeClose(isOpen, onClose);
   const [tab, setTab] = useState<'queue' | 'log'>('queue');
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [log, setLog] = useState<PublishLogEntry[]>([]);
